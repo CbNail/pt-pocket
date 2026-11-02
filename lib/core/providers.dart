@@ -68,22 +68,23 @@ final guardianStatusProvider = FutureProvider<List<GuardianSite>>((ref) async {
   }
 });
 
-/// 当前链路徽标（单链路返回 null 不显示）
+/// 当前链路徽标 —— 任何异常都吞掉返回 null，绝不让 AppBar 崩溃
 final guardianLinkProvider = FutureProvider<LinkInfo?>((ref) async {
-  final conn = await ref.watch(guardianConnProvider.future);
-  final resolver = ref.watch(guardianResolverProvider);
-  final ep = conn.endpoint;
   try {
+    final conn = await ref.watch(guardianConnProvider.future);
+    final resolver = ref.watch(guardianResolverProvider);
+    final ep = conn.endpoint;
     final r = await resolver.resolve(ep, probePath: '/health');
-    if (!ep.isDual) return null;
+    if (!ep.isDual) return null; // 单链路不显示徽标
     return switch (ep.mode) {
       EndpointMode.lanOnly => const LinkInfo('强制内网', true),
       EndpointMode.wanOnly => const LinkInfo('强制外网', false),
-      EndpointMode.auto =>
-        r.isLan ? const LinkInfo('内网直连', true) : const LinkInfo('外网中转', false),
+      EndpointMode.auto => r.isLan
+          ? const LinkInfo('内网直连', true)
+          : const LinkInfo('外网中转', false),
     };
   } catch (_) {
-    return const LinkInfo('链路不通', false);
+    return null; // 未配置 / 链路探测失败时不显示
   }
 });
 
