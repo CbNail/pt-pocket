@@ -1,12 +1,15 @@
 name: pt_pocket
 description: PT Pocket - 一站式 PT 管理
 publish_to: none
-version: 0.1.0+1
+version: 0.2.0+2
 environment:
   sdk: ">=3.4.0 <4.0.0"
 dependencies:
   flutter:
     sdk: flutter
   cupertino_icons: ^1.0.8
+  flutter_riverpod: ^2.5.1
+  dio: ^5.7.0
+  flutter_secure_storage: ^9.2.2
 flutter:
   uses-material-design: true
