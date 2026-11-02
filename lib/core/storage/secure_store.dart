@@ -13,6 +13,13 @@ class SecureStore {
   static const guardianUrl = 'guardian.url';   // v0.3 旧字段，仅迁移用
   static const guardianToken = 'guardian.token';
 
+  // qBittorrent（双链路）
+  static const qbLanUrl = 'qb.lan.url';
+  static const qbWanUrl = 'qb.wan.url';
+  static const qbMode = 'qb.mode';
+  static const qbUsername = 'qb.username';
+  static const qbPassword = 'qb.password';
+
   static Future<String?> read(String key) => _s.read(key: key);
   static Future<void> write(String key, String? value) =>
       _s.write(key: key, value: value);
