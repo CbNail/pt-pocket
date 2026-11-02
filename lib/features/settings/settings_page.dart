@@ -44,12 +44,18 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
     final modeStr = await SecureStore.read(SecureStore.guardianMode);
     final mkey = await SecureStore.read(MTeamClient.storageKey);
     if (!mounted) return;
+    String mode = 'auto';
+    if (modeStr == 'lan') {
+      mode = 'lan';
+    } else if (modeStr == 'wan') {
+      mode = 'wan';
+    }
     setState(() {
       _lan.text = (lan == null || lan.isEmpty) ? (legacy ?? '') : lan;
       _wan.text = wan ?? '';
       _token.text = token ?? '';
       _mteamKey.text = mkey ?? '';
-      _modeStr = (modeStr == 'lan' || modeStr == 'wan') ? modeStr : 'auto';
+      _modeStr = mode;
       _loading = false;
     });
   }
@@ -314,7 +320,7 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
               leading: Icon(Icons.rocket_launch_outlined),
               title: Text('PT Pocket'),
               subtitle:
-                  Text('v0.4.0 · 双链路自动切换\n内网优先 · 断线自动走外网反代'),
+                  Text('v0.4.1 · 双链路自动切换\n内网优先 · 断线自动走外网反代'),
               isThreeLine: true,
             ),
           ),
