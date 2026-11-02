@@ -7,7 +7,7 @@ class MTeamConfig {
 
 class MTeamNotConfigured implements Exception {
   @override
-  String toString() => '未配置 M-Team API Key（请到「设置」页填写）';
+  String toString() => '未配置 M-Team API Key（请到「站点管理」填写）';
 }
 
 class MTeamTorrent {
@@ -24,24 +24,38 @@ class MTeamTorrent {
   });
 
   factory MTeamTorrent.fromJson(Map<String, dynamic> j) {
-    bool free = false;
-    final f = j['free'];
-    if (f == true) free = true;
-    if (f is Map) {
-      final down = (f['downpercent'] as num?) ?? 0;
-      if (down >= 100) free = true;
-    }
-    final d = j['discount'];
-    if (d is String && d.toUpperCase().contains('FREE')) free = true;
+    // 新版 API 把做种/下载数/促销放在嵌套 status 对象里；兼容旧版顶层字段
+    Map<String, dynamic> st = const {};
+    final rawStatus = j['status'];
+    if (rawStatus is Map) st = rawStatus.cast<String, dynamic>();
+
+    String pick(Map<String, dynamic> m, String k) =>
+        m[k] == null ? '' : '${m[k]}';
+
+    final discount = pick(st, 'discount').isNotEmpty
+        ? pick(st, 'discount')
+        : pick(j, 'discount');
+    final seeders = num.tryParse(pick(st, 'seeders').isNotEmpty
+        ? pick(st, 'seeders')
+        : pick(j, 'seeders'));
+    final leechers = num.tryParse(pick(st, 'leechers').isNotEmpty
+        ? pick(st, 'leechers')
+        : pick(j, 'leechers'));
+    String sn = pick(st, 'snatches');
+    if (sn.isEmpty) sn = pick(j, 'snatches');
+    if (sn.isEmpty) sn = pick(j, 'finished');
+
+    // FREE / 2X_FREE 等均视为免费下载
+    final free = discount.toUpperCase().contains('FREE');
 
     return MTeamTorrent(
-      id: '${j['id'] ?? ''}',
-      name: '${j['name'] ?? ''}',
+      id: pick(j, 'id'),
+      name: pick(j, 'name'),
       subtitle: j['smallDescr']?.toString(),
-      sizeBytes: num.tryParse('${j['size']}'),
-      seeders: num.tryParse('${j['seeders']}'),
-      leechers: num.tryParse('${j['leechers']}'),
-      snatches: num.tryParse('${j['snatches'] ?? j['finished'] ?? ''}'),
+      sizeBytes: num.tryParse(pick(j, 'size')),
+      seeders: seeders,
+      leechers: leechers,
+      snatches: num.tryParse(sn),
       isFree: free,
       createdText: j['createdDate']?.toString(),
     );
@@ -87,29 +101,46 @@ class MTeamClient {
     dio.interceptors.add(InterceptorsWrapper(
       onRequest: (options, handler) {
         options.headers['x-api-key'] = cfg.apiKey;
-        options.headers['User-Agent'] = 'PTPocket/0.3';
+        options.headers['User-Agent'] = 'PTPocket/0.4';
         handler.next(options);
       },
     ));
     return MTeamClient._(dio);
   }
 
-  /// 关键词搜索种子
+  /// 关键词搜索种子（官方为 JSON 请求体，响应 code=="0" 为成功）
   Future<List<MTeamTorrent>> search(String keyword) async {
     final r = await _dio.post(
       '/api/torrent/search',
-      data: 'mode=normal&keyword=${Uri.encodeQueryComponent(keyword)}',
-      options: Options(contentType: Headers.formUrlEncodedContentType),
+      data: {'mode': 'normal', 'keyword': keyword, 'page': 1, 'size': 50},
     );
+    if (r.data is! Map) {
+      var raw = r.data.toString();
+      if (raw.length > 200) raw = raw.substring(0, 200);
+      throw Exception('M-Team 返回了非预期格式: $raw');
+    }
     final body = (r.data as Map).cast<String, dynamic>();
-    if (body['msg'] != 'SUCCESS') {
-      throw Exception('M-Team 接口返回异常：${body['msg']}');
+    final code = '${body['code'] ?? ''}'; // code 是字符串 "0"
+    final message = '${body['message'] ?? body['msg'] ?? ''}';
+    if (code != '0') {
+      var raw = r.data.toString();
+      if (raw.length > 200) raw = raw.substring(0, 200);
+      throw Exception('M-Team 返回错误 code=$code message=$message 原始: $raw');
     }
     final data = (body['data'] as Map?)?.cast<String, dynamic>();
-    final inner = (data?['data'] as Map?)?.cast<String, dynamic>();
-    final list = (inner?['list'] as List?) ?? const [];
-    return list
-        .map((e) => MTeamTorrent.fromJson((e as Map).cast<String, dynamic>()))
+    final node = data?['data'];
+    List items;
+    if (node is List) {
+      items = node; // 新版：data.data 直接是数组
+    } else if (node is Map) {
+      items = ((node as Map).cast<String, dynamic>())['list'] as List? ??
+          const []; // 旧版：data.data.list
+    } else {
+      items = const [];
+    }
+    return items
+        .whereType<Map>()
+        .map((e) => MTeamTorrent.fromJson(e.cast<String, dynamic>()))
         .toList();
   }
 }
