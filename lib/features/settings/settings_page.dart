@@ -64,6 +64,7 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
     await SecureStore.write(SecureStore.guardianLanUrl, lan);
     await SecureStore.write(SecureStore.guardianWanUrl, wan);
     await SecureStore.write(SecureStore.guardianMode, _modeStr);
+    await SecureStore.write(SecureStore.guardianToken, _token.text.trim()); // ← 本次修复的关键行
     await SecureStore.write(
         SecureStore.guardianUrl, lan.isNotEmpty ? lan : wan); // 兼容旧字段
     ref.read(guardianResolverProvider).reset();
@@ -143,7 +144,7 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
       _testResult = msg;
       _testOk = ok;
     });
-    if (ok) await _save(tip: 'Guardian 配置已保存，仪表盘刷新中…');
+    if (ok) await _save(tip: 'Guardian 配置已保存（含令牌），仪表盘刷新中…');
   }
 
   @override
@@ -242,7 +243,7 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
               leading: Icon(Icons.rocket_launch_outlined),
               title: Text('PT Pocket'),
               subtitle: Text(
-                  'v0.4.2 · 双链路自动切换 + 站点管理\n服务连接在此页 · 站点凭据在站点页 ⚙'),
+                  'v0.4.3 · 修复令牌持久化\n双链路自动切换 · 站点管理（M-Team）'),
               isThreeLine: true,
             ),
           ),
