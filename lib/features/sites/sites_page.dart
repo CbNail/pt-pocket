@@ -2,7 +2,9 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:pt_pocket/core/network/mteam_client.dart';
 import 'package:pt_pocket/core/providers.dart';
+import 'package:pt_pocket/core/network/qb_client.dart';
 import 'package:pt_pocket/features/sites/site_manage_page.dart';
+import 'package:pt_pocket/features/sites/torrent_detail_page.dart';
 
 class SitesPage extends ConsumerStatefulWidget {
   const SitesPage({super.key});
@@ -117,14 +119,22 @@ class _SitesPageState extends ConsumerState<SitesPage> {
       return const _Hint(
         icon: Icons.travel_explore,
         title: '输入关键词开始搜索',
-        subtitle: '结果列表支持查看体积、做种、下载和 FREE 促销',
+        subtitle: '点击结果卡片可查看详情并推送到 qB 下载',
       );
     }
     return ListView.separated(
       padding: const EdgeInsets.fromLTRB(12, 4, 12, 12),
       itemCount: _items.length,
       separatorBuilder: (_, __) => const SizedBox(height: 8),
-      itemBuilder: (_, i) => _TorrentCard(t: _items[i]),
+      itemBuilder: (_, i) {
+        final t = _items[i];
+        return InkWell(
+          borderRadius: BorderRadius.circular(12),
+          onTap: () => Navigator.of(context).push(MaterialPageRoute(
+              builder: (_) => TorrentDetailPage(torrent: t))),
+          child: _TorrentCard(t: t),
+        );
+      },
     );
   }
 }
@@ -165,6 +175,8 @@ class _TorrentCard extends StatelessWidget {
             if (t.subtitle != null && t.subtitle!.isNotEmpty) ...[
               const SizedBox(height: 4),
               Text(t.subtitle!,
+                  maxLines: 2,
+                  overflow: TextOverflow.ellipsis,
                   style: const TextStyle(color: Colors.white54, fontSize: 13)),
             ],
             const SizedBox(height: 8),
