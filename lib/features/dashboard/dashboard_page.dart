@@ -10,7 +10,10 @@ class DashboardPage extends ConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     final status = ref.watch(guardianStatusProvider);
     return Scaffold(
-      appBar: AppBar(title: const Text('仪表盘')),
+      appBar: AppBar(
+        title: const Text('仪表盘'),
+        actions: const [_LinkBadge()],
+      ),
       body: status.when(
         loading: () => const Center(child: CircularProgressIndicator()),
         error: (e, _) {
@@ -39,6 +42,25 @@ class DashboardPage extends ConsumerWidget {
             ],
           ),
         ),
+      ),
+    );
+  }
+}
+
+/// 当前链路徽标：内网直连 / 外网中转 / 强制xx / 链路不通
+class _LinkBadge extends ConsumerWidget {
+  const _LinkBadge();
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final link = ref.watch(guardianLinkProvider).value;
+    if (link == null) return const SizedBox.shrink();
+    return Padding(
+      padding: const EdgeInsets.only(right: 8),
+      child: Chip(
+        avatar: Icon(link.isLan ? Icons.home_outlined : Icons.public, size: 16),
+        label: Text(link.label, style: const TextStyle(fontSize: 12)),
+        visualDensity: VisualDensity.compact,
       ),
     );
   }
