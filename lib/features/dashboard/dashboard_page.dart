@@ -21,7 +21,7 @@ class DashboardPage extends ConsumerWidget {
             return const _HintCard(
               icon: Icons.settings_suggest_outlined,
               title: '还未连接监护室',
-              subtitle: '到「设置」页填入 Guardian 地址和令牌，\n你的站点健康状态就会出现在这里。',
+              subtitle: '到「设置」页填入 Guardian 地址和令牌，\n测试通过即自动保存。',
             );
           }
           return _HintCard(
@@ -47,22 +47,28 @@ class DashboardPage extends ConsumerWidget {
   }
 }
 
-/// 当前链路徽标：内网直连 / 外网中转 / 强制xx / 链路不通
+/// 链路徽标：全状态兜底，任何情况都不渲染错误控件
 class _LinkBadge extends ConsumerWidget {
   const _LinkBadge();
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    final link = ref.watch(guardianLinkProvider).value;
-    if (link == null) return const SizedBox.shrink();
-    return Padding(
-      padding: const EdgeInsets.only(right: 8),
-      child: Chip(
-        avatar: Icon(link.isLan ? Icons.home_outlined : Icons.public, size: 16),
-        label: Text(link.label, style: const TextStyle(fontSize: 12)),
-        visualDensity: VisualDensity.compact,
-      ),
-    );
+    return ref.watch(guardianLinkProvider).when(
+          data: (link) {
+            if (link == null) return const SizedBox.shrink();
+            return Padding(
+              padding: const EdgeInsets.only(right: 8),
+              child: Chip(
+                avatar:
+                    Icon(link.isLan ? Icons.home_outlined : Icons.public, size: 16),
+                label: Text(link.label, style: const TextStyle(fontSize: 12)),
+                visualDensity: VisualDensity.compact,
+              ),
+            );
+          },
+          loading: () => const SizedBox.shrink(),
+          error: (_, __) => const SizedBox.shrink(),
+        );
   }
 }
 
