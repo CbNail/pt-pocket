@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:pt_pocket/core/network/mteam_client.dart';
 import 'package:pt_pocket/core/providers.dart';
+import 'package:pt_pocket/features/sites/site_manage_page.dart';
 
 class SitesPage extends ConsumerStatefulWidget {
   const SitesPage({super.key});
@@ -59,7 +60,17 @@ class _SitesPageState extends ConsumerState<SitesPage> {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      appBar: AppBar(title: const Text('站点 · M-Team')),
+      appBar: AppBar(
+        title: const Text('站点 · M-Team'),
+        actions: [
+          IconButton(
+            tooltip: '站点管理',
+            icon: const Icon(Icons.settings_outlined),
+            onPressed: () => Navigator.of(context).push(
+                MaterialPageRoute(builder: (_) => const SiteManagePage())),
+          ),
+        ],
+      ),
       body: Column(
         children: [
           Padding(
@@ -92,14 +103,14 @@ class _SitesPageState extends ConsumerState<SitesPage> {
       return _Hint(
         icon: Icons.vpn_key_outlined,
         title: '还未配置 M-Team API Key',
-        subtitle: '到「设置」页的「站点凭据」区填入并保存，\n回来就能搜索了。',
+        subtitle: '点右上角 ⚙ 进入「站点管理」填入 Key，\n测试通过即自动保存，回来就能搜索。',
       );
     }
     if (_error != null) {
       return _Hint(
         icon: Icons.cloud_off_outlined,
         title: '搜索失败',
-        subtitle: '$_error\n\n请检查网络或 API Key 是否有效。',
+        subtitle: '$_error',
       );
     }
     if (_items.isEmpty) {
