@@ -6,7 +6,11 @@ class SecureStore {
     aOptions: AndroidOptions(encryptedSharedPreferences: true),
   );
 
-  static const guardianUrl = 'guardian.url';
+  // Guardian（双链路）
+  static const guardianLanUrl = 'guardian.lan.url';
+  static const guardianWanUrl = 'guardian.wan.url';
+  static const guardianMode = 'guardian.mode'; // auto | lan | wan
+  static const guardianUrl = 'guardian.url';   // v0.3 旧字段，仅迁移用
   static const guardianToken = 'guardian.token';
 
   static Future<String?> read(String key) => _s.read(key: key);
