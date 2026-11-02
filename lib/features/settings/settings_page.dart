@@ -64,13 +64,12 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
     await SecureStore.write(SecureStore.guardianLanUrl, lan);
     await SecureStore.write(SecureStore.guardianWanUrl, wan);
     await SecureStore.write(SecureStore.guardianMode, _modeStr);
-    await SecureStore.write(SecureStore.guardianToken, _token.text.trim()); // ← 本次修复的关键行
+    await SecureStore.write(SecureStore.guardianToken, _token.text.trim()); // 令牌落库
     await SecureStore.write(
         SecureStore.guardianUrl, lan.isNotEmpty ? lan : wan); // 兼容旧字段
     ref.read(guardianResolverProvider).reset();
     ref.invalidate(guardianConnProvider);
-    ref.invalidate(guardianStatusProvider);
-    ref.invalidate(guardianLinkProvider);
+    ref.invalidate(guardianSnapshotProvider);
     if (!mounted) return;
     ScaffoldMessenger.of(context)
         .showSnackBar(SnackBar(content: Text(tip ?? '已保存')));
@@ -168,7 +167,7 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
           Text('服务连接 · Guardian（双链路）',
               style: Theme.of(context).textTheme.titleMedium),
           const SizedBox(height: 4),
-          const Text('自动模式：内网优先，不通自动切换外网（lucky 反代）\n站点凭据请在「站点」页右上角 ⚙ 的站点管理里配置',
+          const Text('自动模式：内网优先，网络切换时自动重新选路并刷新\n站点凭据请在「站点」页右上角 ⚙ 的站点管理里配置',
               style: TextStyle(color: Colors.white38, fontSize: 12)),
           const SizedBox(height: 12),
           TextField(
@@ -243,7 +242,7 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
               leading: Icon(Icons.rocket_launch_outlined),
               title: Text('PT Pocket'),
               subtitle: Text(
-                  'v0.4.3 · 修复令牌持久化\n双链路自动切换 · 站点管理（M-Team）'),
+                  'v0.4.4 · 网络切换哨兵\n切网自动重选链路并刷新 · 徽标与数据同源'),
               isThreeLine: true,
             ),
           ),
