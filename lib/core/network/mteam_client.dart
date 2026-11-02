@@ -24,7 +24,6 @@ class MTeamTorrent {
   });
 
   factory MTeamTorrent.fromJson(Map<String, dynamic> j) {
-    // 新版 API 把做种/下载数/促销放在嵌套 status 对象里；兼容旧版顶层字段
     Map<String, dynamic> st = const {};
     final rawStatus = j['status'];
     if (rawStatus is Map) st = rawStatus.cast<String, dynamic>();
@@ -45,7 +44,6 @@ class MTeamTorrent {
     if (sn.isEmpty) sn = pick(j, 'snatches');
     if (sn.isEmpty) sn = pick(j, 'finished');
 
-    // FREE / 2X_FREE 等均视为免费下载
     final free = discount.toUpperCase().contains('FREE');
 
     return MTeamTorrent(
@@ -101,14 +99,14 @@ class MTeamClient {
     dio.interceptors.add(InterceptorsWrapper(
       onRequest: (options, handler) {
         options.headers['x-api-key'] = cfg.apiKey;
-        options.headers['User-Agent'] = 'PTPocket/0.4';
+        options.headers['User-Agent'] = 'PTPocket/0.5';
         handler.next(options);
       },
     ));
     return MTeamClient._(dio);
   }
 
-  /// 关键词搜索种子（官方为 JSON 请求体，响应 code=="0" 为成功）
+  /// 关键词搜索种子
   Future<List<MTeamTorrent>> search(String keyword) async {
     final r = await _dio.post(
       '/api/torrent/search',
@@ -120,7 +118,7 @@ class MTeamClient {
       throw Exception('M-Team 返回了非预期格式: $raw');
     }
     final body = (r.data as Map).cast<String, dynamic>();
-    final code = '${body['code'] ?? ''}'; // code 是字符串 "0"
+    final code = '${body['code'] ?? ''}';
     final message = '${body['message'] ?? body['msg'] ?? ''}';
     if (code != '0') {
       var raw = r.data.toString();
@@ -131,10 +129,10 @@ class MTeamClient {
     final node = data?['data'];
     List items;
     if (node is List) {
-      items = node; // 新版：data.data 直接是数组
+      items = node;
     } else if (node is Map) {
       items = ((node as Map).cast<String, dynamic>())['list'] as List? ??
-          const []; // 旧版：data.data.list
+          const [];
     } else {
       items = const [];
     }
@@ -142,5 +140,35 @@ class MTeamClient {
         .whereType<Map>()
         .map((e) => MTeamTorrent.fromJson(e.cast<String, dynamic>()))
         .toList();
+  }
+
+  /// 生成下载链接（磁力链或 .torrent URL）
+  /// 官方坑（已验证）：id 必须走 query string、body 留空；JSON body 会报"參數錯誤"
+  Future<String> genDLink(String id) async {
+    var r = await _dio.post('/api/torrent/genDLink',
+        queryParameters: {'id': id});
+    if (r.data is! Map) {
+      var raw = r.data.toString();
+      if (raw.length > 200) raw = raw.substring(0, 200);
+      throw Exception('genDLink 返回非预期格式: $raw');
+    }
+    var body = (r.data as Map).cast<String, dynamic>();
+    if ('${body['code'] ?? ''}' != '0') {
+      // 兜底：极少数文档版本要求 JSON body
+      r = await _dio.post('/api/torrent/genDLink', data: {'id': id});
+      if (r.data is! Map) {
+        throw Exception('genDLink 返回非预期格式: ${r.data}');
+      }
+      body = (r.data as Map).cast<String, dynamic>();
+    }
+    final code = '${body['code'] ?? ''}';
+    if (code != '0') {
+      throw Exception(
+          '获取下载链接失败 code=$code message=${body['message'] ?? body['msg']}');
+    }
+    final data = (body['data'] as Map?)?.cast<String, dynamic>();
+    final url = data?['downloadUrl']?.toString() ?? '';
+    if (url.isEmpty) throw Exception('未取到下载链接（downloadUrl 为空）');
+    return url;
   }
 }
