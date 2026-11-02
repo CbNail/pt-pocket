@@ -75,12 +75,12 @@ class EndpointResolver {
       return ResolvedEndpoint(url: _lastGood!, isLan: _lastGoodIsLan ?? true);
     }
 
-    // 内网快探（2.5s）→ 外网慢探（5s）
-    if (await _probe(ep.lanUrl!, probePath, const Duration(milliseconds: 2500))) {
+    // 内网快探（2s）→ 外网慢探（6s）
+    if (await _probe(ep.lanUrl!, probePath, const Duration(milliseconds: 2000))) {
       _cache(ep.lanUrl!, true);
       return ResolvedEndpoint(url: _strip(ep.lanUrl!), isLan: true);
     }
-    if (await _probe(ep.wanUrl!, probePath, const Duration(seconds: 5))) {
+    if (await _probe(ep.wanUrl!, probePath, const Duration(seconds: 6))) {
       _cache(ep.wanUrl!, false);
       return ResolvedEndpoint(url: _strip(ep.wanUrl!), isLan: false);
     }
