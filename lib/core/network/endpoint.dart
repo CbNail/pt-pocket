@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:dio/dio.dart';
 
 /// 链路模式：自动（内网优先）/ 强制内网 / 强制外网
@@ -24,7 +26,7 @@ class ResolvedEndpoint {
   final bool isLan;
 }
 
-/// 自动选路器：内网优先，失败自动切外网；带 5 分钟缓存，失败即作废
+/// 自动选路器：内网优先；并行探测；带 5 分钟缓存；失败即作废
 class EndpointResolver {
   String? _lastGood;
   bool? _lastGoodIsLan;
@@ -62,28 +64,30 @@ class EndpointResolver {
       return ResolvedEndpoint(url: _strip(ep.wanUrl!), isLan: false);
     }
 
-    // auto：单链路直接用
     if (!ep.isDual) {
       if (ep._hasL) return ResolvedEndpoint(url: _strip(ep.lanUrl!), isLan: true);
       if (ep._hasW) return ResolvedEndpoint(url: _strip(ep.wanUrl!), isLan: false);
       throw Exception('未配置任何地址');
     }
 
-    // 双链路：缓存新鲜直接用
+    // 缓存新鲜直接用（切网哨兵会在网络变化时 reset，缓存失真窗口极小）
     final fresh = DateTime.now().difference(_checkedAt) < _ttl;
     if (fresh && _lastGood != null) {
       return ResolvedEndpoint(url: _lastGood!, isLan: _lastGoodIsLan ?? true);
     }
 
-    // 内网快探（2s）→ 外网慢探（6s）
-    if (await _probe(ep.lanUrl!, probePath, const Duration(milliseconds: 2000))) {
+    // 并行探测：内网 2s / 外网 10s 同时开跑；内网通即刻返回，不等外网
+    final lanF = _probe(ep.lanUrl!, probePath, const Duration(seconds: 2));
+    final wanF = _probe(ep.wanUrl!, probePath, const Duration(seconds: 10));
+    if (await lanF) {
       _cache(ep.lanUrl!, true);
       return ResolvedEndpoint(url: _strip(ep.lanUrl!), isLan: true);
     }
-    if (await _probe(ep.wanUrl!, probePath, const Duration(seconds: 6))) {
+    if (await wanF) {
       _cache(ep.wanUrl!, false);
       return ResolvedEndpoint(url: _strip(ep.wanUrl!), isLan: false);
     }
+    unawaited(wanF);
     throw Exception('内网与外网均不可达');
   }
 
