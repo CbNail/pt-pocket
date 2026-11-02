@@ -4,6 +4,10 @@ on:
     branches: [ main ]
   workflow_dispatch:
 
+concurrency:
+  group: build-apk
+  cancel-in-progress: true
+
 jobs:
   build:
     runs-on: ubuntu-latest
@@ -28,6 +32,20 @@ jobs:
           rm -rf lib
           cp -r /tmp/lib_bak lib
           cp /tmp/pubspec.yaml pubspec.yaml
+
+      - name: Android 调整（网络权限 + 明文HTTP + minSdk）
+        run: |
+          M=android/app/src/main/AndroidManifest.xml
+          grep -q "android.permission.INTERNET" $M || \
+            sed -i 's#</manifest>#  <uses-permission android:name="android.permission.INTERNET"/>\n</manifest>#' $M
+          grep -q usesCleartextTraffic $M || \
+            sed -i 's#<application#<application android:usesCleartextTraffic="true"#' $M
+          for f in android/app/build.gradle android/app/build.gradle.kts; do
+            if [ -f "$f" ]; then
+              sed -i 's/flutter\.minSdkVersion/23/g' "$f"
+              echo "patched $f"
+            fi
+          done
 
       - run: flutter pub get
       - run: flutter build apk --release
