@@ -401,7 +401,7 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
               leading: Icon(Icons.rocket_launch_outlined),
               title: Text('PT Pocket'),
               subtitle: Text(
-                  'v0.5.0 · 搜索→详情→一键推送 qB\nGuardian 监护 + 双链路自动切换'),
+                  'v0.5.1 · 修复构建\n搜索→详情→一键推送 qB（双链路）'),
               isThreeLine: true,
             ),
           ),
