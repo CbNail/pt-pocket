@@ -8,13 +8,13 @@ class DashboardPage extends ConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    final snap = ref.watch(guardianSnapshotProvider);
+    final status = ref.watch(guardianStatusProvider);
     return Scaffold(
       appBar: AppBar(
         title: const Text('仪表盘'),
         actions: const [_LinkBadge()],
       ),
-      body: snap.when(
+      body: status.when(
         loading: () => const Center(child: CircularProgressIndicator()),
         error: (e, _) {
           if (e is GuardianNotConfigured) {
@@ -27,19 +27,18 @@ class DashboardPage extends ConsumerWidget {
           return _HintCard(
             icon: Icons.cloud_off_outlined,
             title: '连接失败',
-            subtitle: '错误信息：\n$e',
-            onRetry: () => ref.invalidate(guardianSnapshotProvider),
+            subtitle: '错误信息：\n$e\n\n请检查 Guardian 是否在线、地址与令牌是否正确。',
           );
         },
-        data: (s) => RefreshIndicator(
-          onRefresh: () async => ref.refresh(guardianSnapshotProvider.future),
+        data: (sites) => RefreshIndicator(
+          onRefresh: () async => ref.refresh(guardianStatusProvider.future),
           child: ListView(
             physics: const AlwaysScrollableScrollPhysics(),
             padding: const EdgeInsets.all(12),
             children: [
-              _SummaryCard(sites: s.sites),
+              _SummaryCard(sites: sites),
               const SizedBox(height: 8),
-              for (final site in s.sites) _SiteTile(site: site),
+              for (final s in sites) _SiteTile(site: s),
             ],
           ),
         ),
@@ -48,22 +47,20 @@ class DashboardPage extends ConsumerWidget {
   }
 }
 
-/// 链路徽标：与数据同源（同一快照），永不出现"徽标说内网、数据走外网"的分裂
+/// 链路徽标：全状态兜底，任何情况都不渲染错误控件
 class _LinkBadge extends ConsumerWidget {
   const _LinkBadge();
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    return ref.watch(guardianSnapshotProvider).when(
-          data: (s) {
-            final link = s.link;
+    return ref.watch(guardianLinkProvider).when(
+          data: (link) {
             if (link == null) return const SizedBox.shrink();
             return Padding(
               padding: const EdgeInsets.only(right: 8),
               child: Chip(
-                avatar: Icon(
-                    link.isLan ? Icons.home_outlined : Icons.public,
-                    size: 16),
+                avatar:
+                    Icon(link.isLan ? Icons.home_outlined : Icons.public, size: 16),
                 label: Text(link.label, style: const TextStyle(fontSize: 12)),
                 visualDensity: VisualDensity.compact,
               ),
@@ -159,16 +156,11 @@ class _SiteTile extends StatelessWidget {
 }
 
 class _HintCard extends StatelessWidget {
-  const _HintCard({
-    required this.icon,
-    required this.title,
-    required this.subtitle,
-    this.onRetry,
-  });
+  const _HintCard(
+      {required this.icon, required this.title, required this.subtitle});
   final IconData icon;
   final String title;
   final String subtitle;
-  final VoidCallback? onRetry;
 
   @override
   Widget build(BuildContext context) {
@@ -185,14 +177,6 @@ class _HintCard extends StatelessWidget {
             Text(subtitle,
                 textAlign: TextAlign.center,
                 style: const TextStyle(color: Colors.white54, height: 1.5)),
-            if (onRetry != null) ...[
-              const SizedBox(height: 20),
-              OutlinedButton.icon(
-                onPressed: onRetry,
-                icon: const Icon(Icons.refresh),
-                label: const Text('重试'),
-              ),
-            ],
           ],
         ),
       ),
