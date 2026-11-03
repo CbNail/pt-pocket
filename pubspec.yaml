@@ -1,7 +1,7 @@
 name: pt_pocket
 description: PT Pocket - 一站式 PT 管理
 publish_to: none
-version: 0.5.0+8
+version: 0.5.1+9
 environment:
   sdk: ">=3.4.0 <4.0.0"
 dependencies:
