@@ -9,16 +9,30 @@ class SecureStore {
   // Guardian（双链路）
   static const guardianLanUrl = 'guardian.lan.url';
   static const guardianWanUrl = 'guardian.wan.url';
-  static const guardianMode = 'guardian.mode'; // auto | lan | wan
-  static const guardianUrl = 'guardian.url';   // v0.3 旧字段，仅迁移用
+  static const guardianMode = 'guardian.mode';
+  static const guardianUrl = 'guardian.url';
   static const guardianToken = 'guardian.token';
 
   // qBittorrent（双链路）
   static const qbLanUrl = 'qb.lan.url';
   static const qbWanUrl = 'qb.wan.url';
   static const qbMode = 'qb.mode';
+  static const qbName = 'qb.name';
   static const qbUsername = 'qb.username';
   static const qbPassword = 'qb.password';
+  static const qbPath = 'qb.path';
+
+  // Transmission（双链路）
+  static const trLanUrl = 'tr.lan.url';
+  static const trWanUrl = 'tr.wan.url';
+  static const trMode = 'tr.mode';
+  static const trName = 'tr.name';
+  static const trUsername = 'tr.username';
+  static const trPassword = 'tr.password';
+  static const trPath = 'tr.path';
+
+  // 收藏的种子 ID（逗号分隔）
+  static const favIds = 'mteam.favids';
 
   static Future<String?> read(String key) => _s.read(key: key);
   static Future<void> write(String key, String? value) =>
