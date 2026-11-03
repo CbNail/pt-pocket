@@ -1,10 +1,11 @@
 import 'package:flutter/material.dart';
 import 'package:pt_pocket/core/theme.dart';
 import 'package:pt_pocket/features/dashboard/dashboard_page.dart';
+import 'package:pt_pocket/features/downloaders/downloaders_page.dart';
 import 'package:pt_pocket/features/settings/settings_page.dart';
 import 'package:pt_pocket/features/sites/sites_page.dart';
 
-/// 应用壳：底部三页导航（IndexedStack 保留各页状态）
+/// 应用壳：底部四页导航（IndexedStack 保留各页状态）
 class PtPocketApp extends StatelessWidget {
   const PtPocketApp({super.key});
 
@@ -36,6 +37,7 @@ class _HomePageState extends State<HomePage> {
         children: const [
           DashboardPage(),
           SitesPage(),
+          DownloadersPage(),
           SettingsPage(),
         ],
       ),
@@ -51,6 +53,10 @@ class _HomePageState extends State<HomePage> {
               icon: Icon(Icons.travel_explore_outlined),
               selectedIcon: Icon(Icons.travel_explore),
               label: '站点'),
+          NavigationDestination(
+              icon: Icon(Icons.download_outlined),
+              selectedIcon: Icon(Icons.download),
+              label: '下载器'),
           NavigationDestination(
               icon: Icon(Icons.settings_outlined),
               selectedIcon: Icon(Icons.settings),
