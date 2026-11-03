@@ -1,18 +1,15 @@
 import 'package:flutter/material.dart';
-import 'package:flutter_riverpod/flutter_riverpod.dart';
-import 'package:pt_pocket/core/providers.dart';
 import 'package:pt_pocket/core/theme.dart';
 import 'package:pt_pocket/features/dashboard/dashboard_page.dart';
 import 'package:pt_pocket/features/settings/settings_page.dart';
 import 'package:pt_pocket/features/sites/sites_page.dart';
 
 /// 应用壳：底部三页导航（IndexedStack 保留各页状态）
-class PtPocketApp extends ConsumerWidget {
+class PtPocketApp extends StatelessWidget {
   const PtPocketApp({super.key});
 
   @override
-  Widget build(BuildContext context, WidgetRef ref) {
-    ref.watch(connectivityRefresherProvider); // 激活网络切换哨兵
+  Widget build(BuildContext context) {
     return MaterialApp(
       title: 'PT Pocket',
       theme: AppTheme.dark,
