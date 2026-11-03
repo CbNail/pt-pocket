@@ -1,0 +1,38 @@
+# ---- 本地工具与临时产物 ----
+.dumate/
+.idea/
+.vscode/
+*.log
+
+# ---- 凭据与环境（绝不提交） ----
+.env
+.env.*
+*.pem
+*.key
+credentials.json
+
+# ---- Python（NAS 后端） ----
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# ---- 运行数据（PostgreSQL / Redis 数据目录禁止入库） ----
+deploy/data/
+deploy/postgres/
+deploy/redis/
+
+# ---- 构建产物 ----
+build/
+dist/
+*.apk
+*.aab
+*.ipa
+
+# ---- 交付包与解压副本（不入库） ----
+*.zip
+pt_pocket_source_v0.7.0/

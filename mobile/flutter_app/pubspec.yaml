@@ -1,0 +1,79 @@
+name: pt_pocket
+description: "PT Pocket —— 面向个人 PT 用户的自托管移动管理中枢（站点 / 搜索 / 下载器 / 数据 / 监护室）。"
+publish_to: 'none'
+
+# versionName + versionCode（Android）/ CFBundleShortVersionString + CFBundleVersion（iOS）
+version: 0.7.0+11
+
+environment:
+  sdk: ^3.13.7
+  flutter: ">=3.47.0"
+
+dependencies:
+  flutter:
+    sdk: flutter
+
+  # 中文本地化（Material/Cupertino 内置文案）
+  flutter_localizations:
+    sdk: flutter
+
+  # UI
+  cupertino_icons: ^1.0.8
+
+  # 状态管理（规范分层：data provider / service provider / ui provider）
+  flutter_riverpod: ^2.6.1
+
+  # 路由（声明式路由 + StatefulShellRoute 保留底部导航页面状态）
+  go_router: ^14.6.2
+
+  # 网络：统一拦截器、重试、日志脱敏、取消、幂等键
+  dio: ^5.7.0
+
+  # 本地安全存储：站点凭据 / 下载器账号 / NAS 会话令牌
+  flutter_secure_storage: ^9.2.2
+
+  # 本地偏好存储：非敏感配置、配置继承基线、schema 版本
+  shared_preferences: ^2.3.3
+
+  # 手势：搜索结果左滑「下载 / 收藏」
+  flutter_slidable: ^3.1.1
+
+  # 网络环境监听：LAN / WAN 自动切换的失效信号
+  connectivity_plus: ^6.1.0
+
+  # 写操作幂等键（链路切换防重复推送）
+  uuid: ^4.5.1
+
+  # 时间 / 数字格式化
+  intl: ^0.20.2
+
+  # CookieCloud 导入：MD5 派生口令 + OpenSSL EVP_BytesToKey + AES-256-CBC 解密
+  pointycastle: ^3.9.1
+
+  # Vaultwarden 内置 WebView 登录（不把主密码提交给 NAS）
+  webview_flutter: ^4.10.0
+
+  # 外链跳转（诊断 / 站点官网 / 帮助）
+  url_launcher: ^6.3.1
+
+  # 版本号读取（关于页 / 配置继承版本比对）
+  package_info_plus: ^8.1.1
+
+  # 本地文件（导入导出 / 诊断日志）
+  path_provider: ^2.1.5
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+
+  integration_test:
+    sdk: flutter
+
+  flutter_lints: ^6.0.0
+
+flutter:
+  uses-material-design: true
+
+  # 设计令牌以 Dart 常量维护（lib/core/theme），此处仅保留资源位，便于后续接入品牌图标。
+  # assets:
+  #   - assets/images/

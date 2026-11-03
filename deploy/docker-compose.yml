@@ -1,0 +1,98 @@
+# PT Pocket 服务端编排（docker-compose）
+#
+# 部署位置约定（需求 14 / 规格书 §14）：
+#   服务端代码与编排文件放在 /data/docker-compose/pt_pocket 或其子目录下，例如：
+#     /data/docker-compose/pt_pocket/
+#       ├── docker-compose.yml      （本文件）
+#       ├── .env                    （由 .env.example 复制并填写，不提交）
+#       ├── backend/                （本仓库 backend/ 目录内容）
+#       └── data/                   （运行时数据：postgres / redis / api / worker）
+#
+# 组件：
+#   - api    ：FastAPI 服务，提供版本化接口 /api/v1（手机端唯一入口）
+#   - worker ：定时任务（站点巡检、签到与失败补签、站庆日历、企业微信 / Telegram 推送）
+#   - postgres：业务数据（数据目录必须落在本地磁盘，不要放 NFS，见规格书 §8）
+#   - redis  ：缓存与任务队列
+#
+# 首次部署：
+#   cd /data/docker-compose/pt_pocket
+#   cp .env.example .env && vi .env
+#   docker compose up -d
+#   curl -s http://127.0.0.1:8000/api/v1/health
+
+name: pt-pocket
+
+services:
+  api:
+    image: pt-pocket-api:latest
+    build:
+      context: ../backend
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      PT_POCKET_ROLE: api
+    ports:
+      - "${API_PORT:-8000}:8000"
+    volumes:
+      - ./data/api:/data
+    depends_on:
+      - postgres
+      - redis
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import sys,urllib.request; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/api/v1/health').status == 200 else 1)"
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+
+  worker:
+    image: pt-pocket-api:latest
+    build:
+      context: ../backend
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      PT_POCKET_ROLE: worker
+    command:
+      - python
+      - -m
+      - app.workers.main
+    volumes:
+      - ./data/worker:/data
+    depends_on:
+      - postgres
+      - redis
+
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: "${POSTGRES_DB:-pt_pocket}"
+      POSTGRES_USER: "${POSTGRES_USER:-pt_pocket}"
+      POSTGRES_PASSWORD: "${POSTGRES_PASSWORD:?请在 .env 中设置 POSTGRES_PASSWORD}"
+      TZ: "${TZ:-Asia/Shanghai}"
+    volumes:
+      # 本地磁盘数据目录；禁止指向 NFS 挂载点
+      - ./data/postgres:/var/lib/postgresql/data
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command:
+      - redis-server
+      - --appendonly
+      - "yes"
+      - --requirepass
+      - "${REDIS_PASSWORD:?请在 .env 中设置 REDIS_PASSWORD}"
+    volumes:
+      - ./data/redis:/data
+
+networks:
+  default:
+    name: pt-pocket
