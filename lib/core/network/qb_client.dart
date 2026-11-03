@@ -1,4 +1,5 @@
 import 'package:dio/dio.dart';
+import 'package:pt_pocket/core/network/endpoint.dart';
 
 class QbNotConfigured implements Exception {
   @override
