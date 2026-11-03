@@ -97,6 +97,9 @@ class _SectionState extends ConsumerState<_Section> {
     final pass = await SecureStore.read(_kPass);
     final path = await SecureStore.read(_kPath);
     if (!mounted) return;
+    String m = 'auto';
+    if (mode == 'lan') m = 'lan';
+    if (mode == 'wan') m = 'wan';
     setState(() {
       _name.text = name ?? '';
       _lan.text = lan ?? '';
@@ -104,7 +107,7 @@ class _SectionState extends ConsumerState<_Section> {
       _user.text = user ?? '';
       _pass.text = pass ?? '';
       _path.text = path ?? '';
-      _modeStr = (mode == 'lan' || mode == 'wan') ? mode : 'auto';
+      _modeStr = m;
       _loading = false;
     });
   }
