@@ -1,9 +1,7 @@
-import 'package:dio/dio.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:pt_pocket/core/network/endpoint.dart';
 import 'package:pt_pocket/core/network/guardian_client.dart';
 import 'package:pt_pocket/core/network/mteam_client.dart';
-import 'package:pt_pocket/core/network/qb_client.dart';
 import 'package:pt_pocket/core/storage/secure_store.dart';
 
 class GuardianConn {
@@ -18,14 +16,12 @@ class LinkInfo {
   final bool isLan;
 }
 
-/// Guardian 双链路 + 令牌（旧版单地址自动迁移为内网地址）
 final guardianConnProvider = FutureProvider<GuardianConn>((ref) async {
   var lan = await SecureStore.read(SecureStore.guardianLanUrl);
   final wan = await SecureStore.read(SecureStore.guardianWanUrl);
   final legacy = await SecureStore.read(SecureStore.guardianUrl);
   final modeStr = await SecureStore.read(SecureStore.guardianMode);
   final token = await SecureStore.read(SecureStore.guardianToken);
-
   if (token == null || token.isEmpty) throw GuardianNotConfigured();
   if (lan == null || lan.isEmpty) lan = legacy;
   final ep = DualEndpoint(
@@ -41,11 +37,9 @@ final guardianConnProvider = FutureProvider<GuardianConn>((ref) async {
   return GuardianConn(endpoint: ep, token: token);
 });
 
-/// 全局选路器（保存配置时 reset）
 final guardianResolverProvider =
     Provider<EndpointResolver>((ref) => EndpointResolver());
 
-/// Guardian 监测状态（失败自动换链路重试一次）
 final guardianStatusProvider = FutureProvider<List<GuardianSite>>((ref) async {
   final conn = await ref.watch(guardianConnProvider.future);
   final resolver = ref.watch(guardianResolverProvider);
@@ -69,7 +63,6 @@ final guardianStatusProvider = FutureProvider<List<GuardianSite>>((ref) async {
   }
 });
 
-/// 当前链路徽标 —— 任何异常都吞掉返回 null，绝不让 AppBar 崩溃
 final guardianLinkProvider = FutureProvider<LinkInfo?>((ref) async {
   try {
     final conn = await ref.watch(guardianConnProvider.future);
@@ -89,38 +82,85 @@ final guardianLinkProvider = FutureProvider<LinkInfo?>((ref) async {
   }
 });
 
-/// M-Team API Key 配置（公网 API，不涉及双链路）
 final mteamConfigProvider = FutureProvider<MTeamConfig?>((ref) async {
   final key = await SecureStore.read(MTeamClient.storageKey);
   if (key == null || key.isEmpty) return null;
   return MTeamConfig(apiKey: key);
 });
 
-/// qBittorrent 双链路 + 账号
-final qbConnProvider = FutureProvider<QbConfig>((ref) async {
-  final lan = await SecureStore.read(SecureStore.qbLanUrl);
-  final wan = await SecureStore.read(SecureStore.qbWanUrl);
-  final modeStr = await SecureStore.read(SecureStore.qbMode);
-  final username = await SecureStore.read(SecureStore.qbUsername);
-  final password = await SecureStore.read(SecureStore.qbPassword);
-  if (username == null ||
-      username.isEmpty ||
-      password == null ||
-      password.isEmpty) {
-    throw QbNotConfigured();
-  }
-  final ep = DualEndpoint(
-    lanUrl: (lan == null || lan.isEmpty) ? null : lan,
-    wanUrl: (wan == null || wan.isEmpty) ? null : wan,
-    mode: switch (modeStr) {
-      'lan' => EndpointMode.lanOnly,
-      'wan' => EndpointMode.wanOnly,
-      _ => EndpointMode.auto,
-    },
-  );
-  if (!ep.hasAny) throw QbNotConfigured();
-  return QbConfig(endpoint: ep, username: username, password: password);
-});
+// ---------- 下载器 ----------
 
-final qbResolverProvider =
-    Provider<EndpointResolver>((ref) => EndpointResolver());
+enum DownloaderType { qbittorrent, transmission }
+
+class DownloaderRuntime {
+  const DownloaderRuntime({
+    required this.id,
+    required this.type,
+    required this.name,
+    required this.endpoint,
+    required this.username,
+    required this.password,
+    this.defaultPath,
+  });
+  final String id;
+  final DownloaderType type;
+  final String name;
+  final DualEndpoint endpoint;
+  final String username;
+  final String password;
+  final String? defaultPath;
+}
+
+String? _nn(String? s) => (s == null || s.trim().isEmpty) ? null : s.trim();
+EndpointMode _pm(String? s) =>
+    s == 'lan' ? EndpointMode.lanOnly : s == 'wan' ? EndpointMode.wanOnly : EndpointMode.auto;
+
+/// 已配置的下载器列表（qB / TR 各一台，填了账密+任一地址即生效）
+final downloadersProvider = FutureProvider<List<DownloaderRuntime>>((ref) async {
+  final list = <DownloaderRuntime>[];
+
+  final qbUser = _nn(await SecureStore.read(SecureStore.qbUsername));
+  final qbPass = _nn(await SecureStore.read(SecureStore.qbPassword));
+  if (qbUser != null && qbPass != null) {
+    final ep = DualEndpoint(
+      lanUrl: _nn(await SecureStore.read(SecureStore.qbLanUrl)),
+      wanUrl: _nn(await SecureStore.read(SecureStore.qbWanUrl)),
+      mode: _pm(await SecureStore.read(SecureStore.qbMode)),
+    );
+    if (ep.hasAny) {
+      final n = _nn(await SecureStore.read(SecureStore.qbName));
+      list.add(DownloaderRuntime(
+        id: 'qb',
+        type: DownloaderType.qbittorrent,
+        name: n ?? 'qBittorrent',
+        endpoint: ep,
+        username: qbUser,
+        password: qbPass,
+        defaultPath: _nn(await SecureStore.read(SecureStore.qbPath)),
+      ));
+    }
+  }
+
+  final trUser = _nn(await SecureStore.read(SecureStore.trUsername));
+  final trPass = _nn(await SecureStore.read(SecureStore.trPassword));
+  if (trUser != null && trPass != null) {
+    final ep = DualEndpoint(
+      lanUrl: _nn(await SecureStore.read(SecureStore.trLanUrl)),
+      wanUrl: _nn(await SecureStore.read(SecureStore.trWanUrl)),
+      mode: _pm(await SecureStore.read(SecureStore.trMode)),
+    );
+    if (ep.hasAny) {
+      final n = _nn(await SecureStore.read(SecureStore.trName));
+      list.add(DownloaderRuntime(
+        id: 'tr',
+        type: DownloaderType.transmission,
+        name: n ?? 'Transmission',
+        endpoint: ep,
+        username: trUser,
+        password: trPass,
+        defaultPath: _nn(await SecureStore.read(SecureStore.trPath)),
+      ));
+    }
+  }
+  return list;
+});
