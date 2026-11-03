@@ -1,5 +1,6 @@
 import 'dart:convert';
 import 'package:dio/dio.dart';
+import 'package:pt_pocket/core/network/endpoint.dart';
 
 class TrNotConfigured implements Exception {
   @override
