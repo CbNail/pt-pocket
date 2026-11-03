@@ -44,8 +44,6 @@ class MTeamTorrent {
     if (sn.isEmpty) sn = pick(j, 'snatches');
     if (sn.isEmpty) sn = pick(j, 'finished');
 
-    final free = discount.toUpperCase().contains('FREE');
-
     return MTeamTorrent(
       id: pick(j, 'id'),
       name: pick(j, 'name'),
@@ -54,7 +52,7 @@ class MTeamTorrent {
       seeders: seeders,
       leechers: leechers,
       snatches: num.tryParse(sn),
-      isFree: free,
+      isFree: discount.toUpperCase().contains('FREE'),
       createdText: j['createdDate']?.toString(),
     );
   }
@@ -99,19 +97,16 @@ class MTeamClient {
     dio.interceptors.add(InterceptorsWrapper(
       onRequest: (options, handler) {
         options.headers['x-api-key'] = cfg.apiKey;
-        options.headers['User-Agent'] = 'PTPocket/0.5';
+        options.headers['User-Agent'] = 'PTPocket/0.6';
         handler.next(options);
       },
     ));
     return MTeamClient._(dio);
   }
 
-  /// 关键词搜索种子
   Future<List<MTeamTorrent>> search(String keyword) async {
-    final r = await _dio.post(
-      '/api/torrent/search',
-      data: {'mode': 'normal', 'keyword': keyword, 'page': 1, 'size': 50},
-    );
+    final r = await _dio.post('/api/torrent/search',
+        data: {'mode': 'normal', 'keyword': keyword, 'page': 1, 'size': 50});
     if (r.data is! Map) {
       var raw = r.data.toString();
       if (raw.length > 200) raw = raw.substring(0, 200);
@@ -123,7 +118,7 @@ class MTeamClient {
     if (code != '0') {
       var raw = r.data.toString();
       if (raw.length > 200) raw = raw.substring(0, 200);
-      throw Exception('M-Team 返回错误 code=$code message=$message 原始: $raw');
+      throw Exception('M-Team 错误 code=$code message=$message 原始: $raw');
     }
     final data = (body['data'] as Map?)?.cast<String, dynamic>();
     final node = data?['data'];
@@ -131,8 +126,8 @@ class MTeamClient {
     if (node is List) {
       items = node;
     } else if (node is Map) {
-      items = ((node as Map).cast<String, dynamic>())['list'] as List? ??
-          const [];
+      items =
+          ((node as Map).cast<String, dynamic>())['list'] as List? ?? const [];
     } else {
       items = const [];
     }
@@ -142,11 +137,12 @@ class MTeamClient {
         .toList();
   }
 
-  /// 生成下载链接（磁力链或 .torrent URL）
-  /// 官方坑（已验证）：id 必须走 query string、body 留空；JSON body 会报"參數錯誤"
+  /// 生成下载链接。id 走 query string、body 留空；
+  /// 单请求 receiveTimeout 提到 45s（服务端生成有时较慢）
   Future<String> genDLink(String id) async {
+    final opts = Options(receiveTimeout: const Duration(seconds: 45));
     var r = await _dio.post('/api/torrent/genDLink',
-        queryParameters: {'id': id});
+        queryParameters: {'id': id}, options: opts);
     if (r.data is! Map) {
       var raw = r.data.toString();
       if (raw.length > 200) raw = raw.substring(0, 200);
@@ -154,11 +150,9 @@ class MTeamClient {
     }
     var body = (r.data as Map).cast<String, dynamic>();
     if ('${body['code'] ?? ''}' != '0') {
-      // 兜底：极少数文档版本要求 JSON body
-      r = await _dio.post('/api/torrent/genDLink', data: {'id': id});
-      if (r.data is! Map) {
-        throw Exception('genDLink 返回非预期格式: ${r.data}');
-      }
+      r = await _dio.post('/api/torrent/genDLink',
+          data: {'id': id}, options: opts);
+      if (r.data is! Map) throw Exception('genDLink 返回非预期格式: ${r.data}');
       body = (r.data as Map).cast<String, dynamic>();
     }
     final code = '${body['code'] ?? ''}';
