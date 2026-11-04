@@ -1,14 +1,12 @@
-import 'dart:io' show File;
-import 'dart:typed_data';
-
-import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart' show MissingPluginException;
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 import 'package:uuid/uuid.dart';
 
 import '../../core/models/pt_site.dart';
 import '../../core/router/app_routes.dart';
+import '../../core/services/platform_file_picker.dart';
 import '../../core/services/ptd_backup_importer.dart';
 import '../../core/services/site_reachability_probe.dart';
 import '../../core/theme/app_colors.dart';
@@ -65,35 +63,25 @@ class _PtdImportPageState extends ConsumerState<PtdImportPage> {
   ///
   /// App 自行识别 zip 内的成员，不需要用户手动指定该用哪个文件。
   Future<void> _pickFile() async {
+    const PlatformFilePicker picker = PlatformFilePicker();
+    if (!picker.isSupported) {
+      setState(() => _error = '当前平台没有系统文件选择器，请改用下面的「粘贴备份 JSON」方式导入');
+      return;
+    }
     try {
-      final FilePickerResult? picked = await FilePicker.pickFiles(
-        dialogTitle: '选择 PTD 备份',
-        type: FileType.custom,
-        allowedExtensions: <String>['zip', 'json'],
-        withData: true,
-      );
-      if (picked == null || picked.files.isEmpty) return;
-
-      final PlatformFile file = picked.files.first;
-      Uint8List? bytes = file.bytes;
-      final String? path = file.path;
-      if (bytes == null && path != null) {
-        bytes = await File(path).readAsBytes();
-      }
-      if (bytes == null) {
-        if (!mounted) return;
-        setState(() => _error = '读取不到所选文件的内容，请换一个文件重试');
-        return;
-      }
-
-      final PtdImportResult result = ref.read(ptdImporterProvider).parseBytes(bytes);
+      final PickedFileData? picked = await picker.pick();
+      if (picked == null) return; // 用户取消
+      final PtdImportResult result = ref.read(ptdImporterProvider).parseBytes(picked.bytes);
       if (!mounted) return;
       setState(() {
         _result = result;
-        _fileName = file.name;
+        _fileName = picked.name;
         _importedCount = null;
         _error = null;
       });
+    } on MissingPluginException {
+      if (!mounted) return;
+      setState(() => _error = '当前平台没有系统文件选择器，请改用下面的「粘贴备份 JSON」方式导入');
     } catch (error) {
       if (!mounted) return;
       setState(() => _error = '选择文件失败：$error');

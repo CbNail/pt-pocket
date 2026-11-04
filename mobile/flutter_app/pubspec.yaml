@@ -61,9 +61,7 @@ dependencies:
 
   # 本地文件（导入导出 / 诊断日志）
   path_provider: ^2.1.5
-  file_picker: ^11.0.3
   archive: ^4.6.0
-
 dev_dependencies:
   flutter_test:
     sdk: flutter
