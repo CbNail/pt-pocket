@@ -37,3 +37,22 @@ String formatEta(int seconds) {
 /// 进度百分比文本（入参为 0–1 的比例）。
 String formatPercent(double ratio, {int fractionDigits = 1}) =>
     '${(ratio * 100).clamp(0, 100).toStringAsFixed(fractionDigits)}%';
+
+/// 整数千分位（魔力、积分等按位读的数字用）。
+String formatNumber(int value) {
+  final String digits = value.abs().toString();
+  final StringBuffer buffer = StringBuffer();
+  for (int i = 0; i < digits.length; i++) {
+    if (i > 0 && (digits.length - i) % 3 == 0) buffer.write(',');
+    buffer.write(digits[i]);
+  }
+  return value < 0 ? '-$buffer' : '$buffer';
+}
+
+/// 日期文本（站点加入时间等，统一 `YYYY-MM-DD`）。
+String formatDate(DateTime date) {
+  final DateTime local = date.toLocal();
+  final String month = local.month.toString().padLeft(2, '0');
+  final String day = local.day.toString().padLeft(2, '0');
+  return '${local.year}-$month-$day';
+}

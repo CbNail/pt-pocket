@@ -11,6 +11,10 @@ abstract final class PrefKeys {
   static const String endpointWan = 'endpoint.wan';
   static const String legacyServerBaseUrl = 'server.baseUrl';
 
+  /// 可达性探测结果前缀（`probe.<目标>`，如 `probe.endpoint.lan`、`probe.downloader.<id>`）。
+  /// 只存结论与时间，供重进页面时直接展示「上次结果」，不存任何凭据。
+  static const String probePrefix = 'probe.';
+
   // 外观
   static const String themeMode = 'theme.mode';
 

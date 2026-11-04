@@ -16,6 +16,9 @@ import '../sites/site_providers.dart';
 final Provider<ProfileApi> profileApiProvider =
     Provider<ProfileApi>((Ref ref) => ProfileApi(client: ref.watch(apiClientProvider)));
 
+final Provider<SiteStatsApi> siteStatsApiProvider =
+    Provider<SiteStatsApi>((Ref ref) => SiteStatsApi(client: ref.watch(apiClientProvider)));
+
 final Provider<MonitorApi> monitorApiProvider =
     Provider<MonitorApi>((Ref ref) => MonitorApi(client: ref.watch(apiClientProvider)));
 
@@ -36,6 +39,60 @@ final FutureProvider<PtDataSnapshot> profileDataProvider = FutureProvider<PtData
           .toList(growable: false);
   return ref.watch(profileApiProvider).fetch(siteIds: siteIds);
 });
+
+// ---------------------------------------------------------------- 站点数据刷新
+
+/// 站点数据刷新的进行状态。
+class SiteRefreshView {
+  const SiteRefreshView({this.refreshingSiteId, this.refreshingAll = false, this.error});
+
+  /// 正在刷新的单个站点 id（null 表示没有单站刷新在进行）。
+  final String? refreshingSiteId;
+  final bool refreshingAll;
+
+  /// 最近一次刷新的失败原因。
+  final String? error;
+
+  bool get busy => refreshingAll || refreshingSiteId != null;
+}
+
+/// 站点数据刷新控制器：顶部「刷新」刷新全部，卡片内可单独刷新某站。
+///
+/// 刷新后统一失效 [profileDataProvider]——站点页与「我的数据」共用同一份数据口径。
+final NotifierProvider<SiteRefreshController, SiteRefreshView> siteRefreshControllerProvider =
+    NotifierProvider<SiteRefreshController, SiteRefreshView>(SiteRefreshController.new);
+
+class SiteRefreshController extends Notifier<SiteRefreshView> {
+  @override
+  SiteRefreshView build() => const SiteRefreshView();
+
+  Future<void> refreshAll() async {
+    state = const SiteRefreshView(refreshingAll: true);
+    try {
+      final List<String> siteIds =
+          (ref.read(siteListProvider).valueOrNull ?? const <dynamic>[])
+              .where((dynamic s) => s.enabled == true)
+              .map((dynamic s) => s.id as String)
+              .toList(growable: false);
+      await ref.read(siteStatsApiProvider).refreshAll(siteIds: siteIds);
+      state = const SiteRefreshView();
+      ref.invalidate(profileDataProvider);
+    } on ApiException catch (error) {
+      state = SiteRefreshView(error: error.message);
+    }
+  }
+
+  Future<void> refreshSite(String siteId) async {
+    state = SiteRefreshView(refreshingSiteId: siteId);
+    try {
+      await ref.read(siteStatsApiProvider).refreshSite(siteId);
+      state = const SiteRefreshView();
+      ref.invalidate(profileDataProvider);
+    } on ApiException catch (error) {
+      state = SiteRefreshView(error: error.message);
+    }
+  }
+}
 
 // ---------------------------------------------------------------- 监护室
 
@@ -120,19 +177,19 @@ class SignInController extends Notifier<SignInState> {
   @override
   SignInState build() => const SignInState();
 
-  /// 一键签到：对启用站点批量下发。
-  Future<void> runAll() async {
+  /// 一键签到：对启用站点批量下发。[mode] 见 [SignInMode]。
+  Future<void> runAll({SignInMode mode = SignInMode.both}) async {
     final List<String> siteIds =
         (ref.read(siteListProvider).valueOrNull ?? const <dynamic>[])
             .where((dynamic s) => s.enabled == true)
             .map((dynamic s) => s.id as String)
             .toList(growable: false);
-    await _run(() => ref.read(signInApiProvider).runAll(siteIds: siteIds));
+    await _run(() => ref.read(signInApiProvider).runAll(siteIds: siteIds, mode: mode));
   }
 
   /// 单站补签。
-  Future<void> runSite(String siteId) =>
-      _run(() => ref.read(signInApiProvider).runSite(siteId));
+  Future<void> runSite(String siteId, {SignInMode mode = SignInMode.both}) =>
+      _run(() => ref.read(signInApiProvider).runSite(siteId, mode: mode));
 
   Future<void> _run(Future<SignInRunResult> Function() action) async {
     state = state.copyWith(running: true, clearError: true);

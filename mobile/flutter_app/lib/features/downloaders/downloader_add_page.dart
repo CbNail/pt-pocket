@@ -4,10 +4,14 @@ import 'package:go_router/go_router.dart';
 import 'package:uuid/uuid.dart';
 
 import '../../core/models/downloader.dart';
+import '../../core/network/address_probe_controller.dart';
+import '../../core/network/url_utils.dart';
+import '../../core/providers.dart';
 import '../../core/router/app_routes.dart';
-import '../../core/services/site_reachability_probe.dart';
+import '../../core/storage/probe_result_store.dart';
 import '../../core/theme/app_colors.dart';
 import '../../core/theme/design_tokens.dart';
+import '../../shared/widgets/address_field.dart';
 import '../../shared/widgets/section_card.dart';
 import '../../shared/widgets/status_badge.dart';
 import 'downloader_providers.dart';
@@ -15,6 +19,12 @@ import 'downloader_providers.dart';
 /// 添加 / 编辑下载器（需求 3）。
 ///
 /// 账号密码只保存在本机安全存储；各引擎协议调用由 NAS 后端适配器完成。
+///
+/// 本轮改造要点（地址录入与实时连通）：
+/// - 地址按「协议点选 + 主机 + 端口（可改）+ 可选子路径」分开录入，粘贴整条 URL 自动拆分；
+/// - 端口按引擎给出默认值（qBittorrent 8080 / Transmission 9091 / Aria2 6800）；
+/// - 填完即探测，地址后直接给出连通标记；测试后自动保存本页内容；
+/// - 探测结论落盘（key `downloader.<id>`），重新进入页面按已存地址实测，而不是一律「未检测」。
 class DownloaderAddPage extends ConsumerStatefulWidget {
   const DownloaderAddPage({super.key, this.downloaderId});
 
@@ -28,21 +38,39 @@ class DownloaderAddPage extends ConsumerStatefulWidget {
 class _DownloaderAddPageState extends ConsumerState<DownloaderAddPage> {
   final GlobalKey<FormState> _formKey = GlobalKey<FormState>();
   final TextEditingController _name = TextEditingController();
-  final TextEditingController _url = TextEditingController();
+  final TextEditingController _host = TextEditingController();
+  final TextEditingController _port = TextEditingController();
+  final TextEditingController _path = TextEditingController();
   final TextEditingController _username = TextEditingController();
   final TextEditingController _password = TextEditingController();
   final TextEditingController _savePath = TextEditingController();
 
   DownloaderKind _kind = DownloaderKind.qbittorrent;
-  SiteProbeResult? _probeResult;
-  bool _probing = false;
+  String _scheme = 'http';
   bool _saving = false;
   bool _prefilled = false;
 
-  /// 本页对应的下载器 id：首次保存时生成并复用，避免「测试一次就多建一条」。
+  /// 本页对应的下载器 id：首次落盘时生成并复用，避免「测试一次就多建一条」。
   String? _pendingId;
 
+  late final AddressProbeController _probes;
+  late final String _probeKey;
+
   bool get _isEditing => widget.downloaderId != null;
+
+  @override
+  void initState() {
+    super.initState();
+    // 新建时先定下 id，探测结果才有稳定的落盘 key（此时还不会创建记录）。
+    if (!_isEditing) _pendingId = const Uuid().v4();
+    _probeKey = 'downloader.${widget.downloaderId ?? _pendingId}';
+    _probes = AddressProbeController(
+      store: ref.read(probeResultStoreProvider),
+      probe: _probe,
+      // 下载器是内网自建服务，超时按内网档处理。
+      timeout: Duration(seconds: 5),
+    )..addListener(_onProbeChanged);
+  }
 
   @override
   void didChangeDependencies() {
@@ -50,25 +78,100 @@ class _DownloaderAddPageState extends ConsumerState<DownloaderAddPage> {
     // 编辑模式下仅预填一次，避免用户输入被后续依赖变化覆盖。
     if (_prefilled) return;
     _prefilled = true;
-    if (!_isEditing) return;
-
-    final DownloaderConfig? config = ref.read(downloaderByIdProvider(widget.downloaderId!));
-    if (config == null) return;
-    _name.text = config.name;
-    _url.text = config.baseUrl;
-    _username.text = config.username;
-    _savePath.text = config.defaultSavePath;
-    _kind = config.kind;
+    if (_isEditing) {
+      final DownloaderConfig? config = ref.read(downloaderByIdProvider(widget.downloaderId!));
+      if (config != null) {
+        _name.text = config.name;
+        _kind = config.kind;
+        _fillAddress(config.baseUrl);
+        _username.text = config.username;
+        _savePath.text = config.defaultSavePath;
+      }
+    }
+    if (_port.text.trim().isEmpty) _port.text = '${_defaultPortForKind(_kind)}';
+    // 进页面就按已存地址实测一次：状态实时，而不是固定「未检测」。
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted && _configured) _probes.probeNow(_probeKey, _uri);
+    });
   }
 
   @override
   void dispose() {
     _name.dispose();
-    _url.dispose();
+    _host.dispose();
+    _port.dispose();
+    _path.dispose();
     _username.dispose();
     _password.dispose();
     _savePath.dispose();
+    _probes.dispose();
     super.dispose();
+  }
+
+  // ---------- 地址 ----------
+
+  static int _defaultPortForKind(DownloaderKind kind) => switch (kind) {
+        DownloaderKind.qbittorrent => 8080,
+        DownloaderKind.transmission => 9091,
+        DownloaderKind.aria2 => 6800,
+      };
+
+  bool get _configured => _host.text.trim().isNotEmpty;
+
+  Uri? get _uri => UrlUtils.compose(
+        scheme: _scheme,
+        host: _host.text,
+        port: _port.text,
+        path: _path.text.trim(),
+      );
+
+  void _fillAddress(String baseUrl) {
+    final AddressParts parts = UrlUtils.split(baseUrl);
+    if (parts.isEmpty) {
+      _scheme = 'http';
+      _host.text = baseUrl;
+      return;
+    }
+    _scheme = parts.scheme;
+    _host.text = parts.host;
+    _port.text = parts.portText;
+    _path.text = parts.path;
+  }
+
+  /// 切换协议时的端口兜底：空值或另一种协议的默认端口跟着换。
+  void _onSchemeChanged(String value) {
+    setState(() {
+      _port.text = UrlUtils.adjustPortForScheme(scheme: value, currentPort: _port.text);
+      _scheme = value;
+    });
+    _scheduleProbe();
+  }
+
+  /// 切换引擎时的端口兜底：空值或其它引擎的默认端口跟着换成新引擎默认端口。
+  void _onKindChanged(DownloaderKind value) {
+    setState(() {
+      final String current = _port.text.trim();
+      final int next = _defaultPortForKind(value);
+      final bool isOtherDefault = current.isNotEmpty &&
+          DownloaderKind.values
+              .where((DownloaderKind k) => k != value)
+              .any((DownloaderKind k) => current == _defaultPortForKind(k).toString());
+      if (current.isEmpty || isOtherDefault) _port.text = '$next';
+      _kind = value;
+    });
+    _scheduleProbe();
+  }
+
+  void _scheduleProbe() => _probes.schedule(_probeKey, _configured ? _uri : null);
+
+  Future<ProbeSnapshot> _probe(Uri target, Duration timeout) async =>
+      snapshotFromSiteProbe(
+        await ref.read(downloaderProbeProvider)(target.toString(), timeout: timeout),
+        target,
+      );
+
+  void _onProbeChanged() {
+    if (mounted) setState(() {});
   }
 
   void _leave() {
@@ -83,37 +186,33 @@ class _DownloaderAddPageState extends ConsumerState<DownloaderAddPage> {
     ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(message)));
   }
 
-  /// 测试连接：只探测地址可达性；测试后自动保存当前填写内容（无论测试成功或失败）。
+  /// 测试连接：探测地址可达性并落盘结论；测试后自动保存当前填写内容（无论成功或失败）。
   Future<void> _testConnection() async {
-    final String url = _url.text.trim();
-    if (url.isEmpty) {
+    if (!_configured) {
       _snack('请先填写下载器地址');
+      return;
+    }
+    if (_uri == null) {
+      _snack('端口不正确：请填 1–65535 之间的数字');
       return;
     }
     if (!(_formKey.currentState?.validate() ?? false)) {
       _snack('名称与地址填好后测试，测试成功与否都会自动保存');
       return;
     }
-    setState(() {
-      _probing = true;
-      _probeResult = null;
-    });
-    final SiteProbeResult result = await ref.read(downloaderProbeProvider)(url);
-    if (!mounted) return;
-    setState(() {
-      _probing = false;
-      _probeResult = result;
-    });
+    await _probes.probeNow(_probeKey, _uri);
+    final ProbeSnapshot? snapshot = _probes.snapshot(_probeKey);
 
     final DownloaderConfig saved = await _persist();
-    await ref.read(downloaderListProvider.notifier).recordProbe(saved.id, result.isSuccess);
+    await ref
+        .read(downloaderListProvider.notifier)
+        .recordProbe(saved.id, snapshot?.reachable ?? false);
     if (!mounted) return;
-    _snack('已自动保存下载器 · 连接测试：${result.outcome.label}');
+    _snack('已自动保存下载器 · 连接测试：${snapshot?.reachable == true ? '地址可达' : '不可达'}');
   }
 
   /// 落盘当前表单内容（新增或更新同一条），供「测试后自动保存」与「保存下载器」共用。
   Future<DownloaderConfig> _persist() async {
-    final Uri? uri = SiteReachabilityProbe.parseSiteUri(_url.text);
     final String id = widget.downloaderId ?? (_pendingId ??= const Uuid().v4());
     final String username = _username.text.trim();
     final String password = _password.text;
@@ -140,7 +239,7 @@ class _DownloaderAddPageState extends ConsumerState<DownloaderAddPage> {
       id: id,
       name: _name.text.trim(),
       kind: _kind,
-      baseUrl: uri?.toString() ?? _url.text.trim(),
+      baseUrl: _uri?.toString() ?? _host.text.trim(),
       username: username,
       defaultSavePath: _savePath.text.trim(),
       credentialConfigured: credential != null || existing.credentialConfigured,
@@ -156,6 +255,14 @@ class _DownloaderAddPageState extends ConsumerState<DownloaderAddPage> {
 
   Future<void> _save() async {
     if (!(_formKey.currentState?.validate() ?? false)) return;
+    if (!_configured) {
+      _snack('请填写下载器地址（主机与端口）');
+      return;
+    }
+    if (_uri == null) {
+      _snack('地址不正确：请检查端口是否为 1–65535');
+      return;
+    }
     setState(() => _saving = true);
     final DownloaderConfig config = await _persist();
     if (!mounted) return;
@@ -172,6 +279,8 @@ class _DownloaderAddPageState extends ConsumerState<DownloaderAddPage> {
         ? const AsyncData<Map<String, dynamic>?>(null)
         : ref.watch(downloaderCredentialProvider(downloaderId));
     final bool hasPassword = credentialAsync.valueOrNull != null;
+    final ProbeSnapshot? snapshot = _probes.snapshot(_probeKey);
+    final bool probing = _probes.isProbing(_probeKey);
 
     return Scaffold(
       appBar: AppBar(
@@ -185,7 +294,7 @@ class _DownloaderAddPageState extends ConsumerState<DownloaderAddPage> {
           children: <Widget>[
             SectionCard(
               title: '下载器信息',
-              subtitle: '引擎差异由服务端适配器消解，App 只需填地址与账号',
+              subtitle: '协议点选、主机与端口分开填；填完即自动检测，测试后自动保存',
               child: Column(
                 children: <Widget>[
                   TextFormField(
@@ -206,10 +315,7 @@ class _DownloaderAddPageState extends ConsumerState<DownloaderAddPage> {
                         .toList(growable: false),
                     onChanged: (DownloaderKind? value) {
                       if (value == null) return;
-                      setState(() {
-                        _kind = value;
-                        _probeResult = null;
-                      });
+                      _onKindChanged(value);
                     },
                   ),
                   const SizedBox(height: AppSpacing.xs),
@@ -218,19 +324,19 @@ class _DownloaderAddPageState extends ConsumerState<DownloaderAddPage> {
                     child: Text(_kind.description, style: theme.textTheme.bodySmall),
                   ),
                   const SizedBox(height: AppSpacing.md),
-                  TextFormField(
-                    controller: _url,
-                    keyboardType: TextInputType.url,
-                    decoration: const InputDecoration(
-                      labelText: '地址',
-                      hintText: 'http://192.168.1.10:8080',
-                    ),
-                    validator: (String? value) {
-                      final String text = value?.trim() ?? '';
-                      if (text.isEmpty) return '请填写下载器地址';
-                      if (SiteReachabilityProbe.parseSiteUri(text) == null) return '地址格式不正确';
-                      return null;
-                    },
+                  AddressInput(
+                    label: '地址',
+                    keyPrefix: 'downloader',
+                    scheme: _scheme,
+                    hostController: _host,
+                    portController: _port,
+                    pathController: _path,
+                    onSchemeChanged: _onSchemeChanged,
+                    snapshot: snapshot,
+                    probing: probing,
+                    hostHint: '192.168.1.10',
+                    onEdited: _scheduleProbe,
+                    onSubmitted: () => _probes.probeNow(_probeKey, _uri),
                   ),
                   const SizedBox(height: AppSpacing.md),
                   TextFormField(
@@ -275,22 +381,28 @@ class _DownloaderAddPageState extends ConsumerState<DownloaderAddPage> {
                   Row(
                     children: <Widget>[
                       FilledButton.tonalIcon(
-                        onPressed: _probing ? null : _testConnection,
+                        onPressed: probing ? null : _testConnection,
                         icon: const Icon(Icons.network_check, size: AppSizes.iconSm),
-                        label: Text(_probing ? '测试中…' : '测试连接'),
+                        label: Text(probing ? '测试中…' : '测试连接'),
                       ),
                       const SizedBox(width: AppSpacing.md),
-                      if (_probeResult != null)
+                      if (!probing && snapshot != null)
                         StatusBadge(
-                          label: _probeResult!.outcome.label,
-                          tone: _probeResult!.isSuccess ? StatusTone.ok : StatusTone.danger,
-                          icon: _probeResult!.isSuccess ? Icons.check_circle_outline : Icons.error_outline,
+                          label: describeProbe(snapshot),
+                          tone: snapshot.usable
+                              ? StatusTone.ok
+                              : (snapshot.reachable ? StatusTone.warning : StatusTone.danger),
+                          icon: snapshot.usable
+                              ? Icons.check_circle_outline
+                              : (snapshot.reachable
+                                  ? Icons.error_outline
+                                  : Icons.cancel_outlined),
                         ),
                     ],
                   ),
-                  if (_probeResult != null) ...<Widget>[
+                  if (!probing && snapshot != null && snapshot.message.isNotEmpty) ...<Widget>[
                     const SizedBox(height: AppSpacing.sm),
-                    Text(_probeResult!.message, style: theme.textTheme.bodySmall),
+                    Text(snapshot.message, style: theme.textTheme.bodySmall),
                   ],
                 ],
               ),

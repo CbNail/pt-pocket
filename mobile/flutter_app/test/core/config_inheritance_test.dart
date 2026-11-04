@@ -53,7 +53,12 @@ void main() {
     expect(result.fromVersion, 1);
     expect(
       result.appliedMigrations,
-      <String>['1_to_2_dual_endpoint', '2_to_3_proxy_and_search', '3_to_4_moviepilot_dual_endpoint'],
+      <String>[
+        '1_to_2_dual_endpoint',
+        '2_to_3_proxy_and_search',
+        '3_to_4_moviepilot_dual_endpoint',
+        '4_to_5_default_downloader',
+      ],
     );
 
     // 旧单一地址迁移到内网通道，并删除旧键。
@@ -121,5 +126,48 @@ void main() {
     final MpInstance model = MpInstance.fromJson(lan);
     expect(model.lanUri.toString(), 'http://192.168.1.10:3000');
     expect(model.hasAnyAddress, isTrue);
+  });
+
+  test('v4 -> v5：旧下载器补齐「默认下载器」标记，且只留一条默认', () async {
+    SharedPreferences.setMockInitialValues(<String, Object>{
+      'ptp.config.schemaVersion': 4,
+      'ptp.downloaders.index': jsonEncode(<String, dynamic>{
+        'version': 1,
+        'downloaders': <Map<String, dynamic>>[
+          <String, dynamic>{
+            'id': 'd1',
+            'name': '主力 qB',
+            'kind': 'qbittorrent',
+            'baseUrl': 'http://192.168.1.10:8080',
+            'username': 'admin',
+          },
+          <String, dynamic>{
+            'id': 'd2',
+            'name': '备用 tr',
+            'kind': 'transmission',
+            'baseUrl': 'http://192.168.1.10:9091',
+          },
+        ],
+      }),
+    });
+    final PrefsStore legacyPrefs = PrefsStore(await SharedPreferences.getInstance());
+    final ConfigInheritanceService legacy = ConfigInheritanceService(
+      prefs: legacyPrefs,
+      secure: SecureStore(),
+    );
+
+    final ConfigInheritanceResult result = await legacy.initialize(appVersion: '0.7.2');
+    expect(result.appliedMigrations, contains('4_to_5_default_downloader'));
+
+    final Map<String, dynamic>? index = legacyPrefs.getJson('downloaders.index');
+    final List<dynamic> records = index!['downloaders'] as List<dynamic>;
+    expect(records, hasLength(2));
+    // 补齐标记：恰好第一条为默认。
+    expect((records[0] as Map)['isDefault'], isTrue);
+    expect((records[1] as Map)['isDefault'], isFalse);
+    // 既有字段一个都不能丢。
+    expect((records[0] as Map)['username'], 'admin');
+    expect((records[0] as Map)['baseUrl'], 'http://192.168.1.10:8080');
+    expect((records[1] as Map)['kind'], 'transmission');
   });
 }

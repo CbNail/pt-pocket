@@ -174,6 +174,39 @@ class ConfigInheritanceService {
         }
       },
     ),
+    // v4 -> v5：下载器新增「默认下载器」标记。
+    // 只补键、不改既有字段：旧数据没有 isDefault 时补上，并保证恰好有一条为默认
+    // （有下载器却一个默认都没有会让「推到默认下载器」无从落地）。
+    ConfigMigration(
+      id: '4_to_5_default_downloader',
+      toVersion: 5,
+      run: (PrefsStore prefs, SecureStore secure) async {
+        final Map<String, dynamic>? index = prefs.getJson('downloaders.index');
+        if (index == null) return;
+        final Object? rawList = index['downloaders'];
+        if (rawList is! List) return;
+
+        final List<Map<String, dynamic>> migrated = <Map<String, dynamic>>[];
+        for (final Object? item in rawList) {
+          if (item is! Map) continue;
+          migrated.add(Map<String, dynamic>.from(item));
+        }
+        if (migrated.isEmpty) return;
+
+        final int existingDefault = migrated.indexWhere(
+          (Map<String, dynamic> item) => item['isDefault'] == true,
+        );
+        final int keep = existingDefault >= 0 ? existingDefault : 0;
+        for (int i = 0; i < migrated.length; i++) {
+          migrated[i]['isDefault'] = i == keep;
+        }
+
+        await prefs.setJson('downloaders.index', <String, dynamic>{
+          if (index['version'] != null) 'version': 2,
+          'downloaders': migrated,
+        });
+      },
+    ),
   ];
 }
 

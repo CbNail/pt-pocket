@@ -104,4 +104,93 @@ abstract final class UrlUtils {
     if (uri.userInfo.isEmpty) return uri.toString();
     return uri.replace(userInfo: '').toString();
   }
+
+  // ---------- 地址组成部分（协议 / 主机 / 端口 / 路径） ----------
+
+  /// 协议默认端口。
+  static int defaultPort(String scheme) => scheme == 'https' ? 443 : 80;
+
+  /// 解析用户输入（含直接粘贴的整条 URL）为组成部分；无法解析时返回空值对象。
+  static AddressParts split(String? raw) {
+    final Uri? uri = normalize(raw);
+    if (uri == null) return const AddressParts();
+    return AddressParts(
+      scheme: uri.scheme,
+      host: uri.host,
+      port: uri.hasPort ? uri.port : defaultPort(uri.scheme),
+      path: uri.path,
+    );
+  }
+
+  /// 由「协议 + 主机 + 端口」拼出地址。
+  ///
+  /// - 端口留空表示用协议默认端口（界面里端口框有默认值，清空即回落默认）；
+  /// - 端口填了但非法（非数字、0、超过 65535）直接返回 `null`，
+  ///   由页面提示「端口不正确」——绝不悄悄替换成默认端口，那样用户会以为填对了。
+  /// - 主机为空返回 `null`。
+  static Uri? compose({
+    required String scheme,
+    required String host,
+    required String port,
+    String path = '',
+  }) {
+    final String text = port.trim();
+    int parsed = 0;
+    if (text.isNotEmpty) {
+      final int? value = int.tryParse(text);
+      if (value == null || value < 1 || value > 65535) return null;
+      parsed = value;
+    }
+    return AddressParts(scheme: scheme, host: host, port: parsed, path: path).toUri();
+  }
+
+  /// 切换协议时给端口兜底：端口为空、或正好是另一种协议的默认端口时，跟着换成新协议的默认端口；
+  /// 用户显式填过的非默认端口保持不动。
+  static String adjustPortForScheme({required String scheme, required String currentPort}) {
+    final int next = defaultPort(scheme);
+    final String text = currentPort.trim();
+    if (text.isEmpty) return '$next';
+    final int? value = int.tryParse(text);
+    if (value == null) return text;
+    final String other = scheme == 'https' ? 'http' : 'https';
+    return value == defaultPort(other) ? '$next' : text;
+  }
+}
+
+/// 地址的组成部分：协议、主机、端口（0 表示用协议默认端口）、路径。
+///
+/// 页面上的地址按「协议点选 + 主机 + 端口」分开录入，拼装与回填都走这里，
+/// 避免每个页面各写一套拼地址的逻辑。
+class AddressParts {
+  const AddressParts({this.scheme = 'https', this.host = '', this.port = 0, this.path = ''});
+
+  final String scheme;
+  final String host;
+
+  /// 0 表示「按协议默认端口处理」。
+  final int port;
+  final String path;
+
+  bool get isEmpty => host.trim().isEmpty;
+
+  /// 回填输入框用的端口文本：始终显式给出端口，便于用户看到并修改。
+  String get portText => '${port > 0 ? port : UrlUtils.defaultPort(scheme)}';
+
+  /// 拼成可用的 URI；主机为空返回 `null`。
+  Uri? toUri() {
+    final String normalizedHost = host.trim();
+    if (normalizedHost.isEmpty) return null;
+    final int effectivePort = port > 0 ? port : UrlUtils.defaultPort(scheme);
+    // 端口越界时不要抛异常，交给调用方给出「端口不正确」的提示。
+    if (effectivePort < 1 || effectivePort > 65535) return null;
+    final int? explicitPort = effectivePort == UrlUtils.defaultPort(scheme) ? null : effectivePort;
+    return Uri(scheme: scheme, host: normalizedHost, port: explicitPort, path: path);
+  }
+
+  AddressParts copyWith({String? scheme, String? host, int? port, String? path}) => AddressParts(
+        scheme: scheme ?? this.scheme,
+        host: host ?? this.host,
+        port: port ?? this.port,
+        path: path ?? this.path,
+      );
 }

@@ -119,12 +119,38 @@ class PtDataPage extends ConsumerWidget {
                               Row(
                                 children: <Widget>[
                                   Expanded(
+                                    child: _Metric(
+                                      label: '今日上传',
+                                      value: snapshot.todayUploadLabel,
+                                    ),
+                                  ),
+                                  const SizedBox(width: AppSpacing.md),
+                                  Expanded(
+                                    child: _Metric(
+                                      label: '今日下载',
+                                      value: snapshot.todayDownloadLabel,
+                                    ),
+                                  ),
+                                ],
+                              ),
+                              const SizedBox(height: AppSpacing.md),
+                              Row(
+                                children: <Widget>[
+                                  Expanded(
                                     child: _Metric(label: '今日签到', value: '${snapshot.signedInCount}/${snapshot.siteCount}'),
                                   ),
                                   const SizedBox(width: AppSpacing.md),
                                   Expanded(child: _Metric(label: '魔力合计', value: '${snapshot.totalBonus}')),
                                 ],
                               ),
+                              if (!snapshot.hasTodayBaseline) ...<Widget>[
+                                const SizedBox(height: AppSpacing.md),
+                                Text(
+                                  '今日增量 = 当日累计 − 前一自然日累计；缺少前一日的基线快照，'
+                                  '所以暂不显示数值（后端补齐历史快照后自动恢复）。',
+                                  style: theme.textTheme.bodySmall,
+                                ),
+                              ],
                             ],
                           ),
                         ),
@@ -153,6 +179,8 @@ class PtDataPage extends ConsumerWidget {
                                 children: <Widget>[
                                   _InfoRow(label: '上传', value: formatBytes(stats.uploadedBytes)),
                                   _InfoRow(label: '下载', value: formatBytes(stats.downloadedBytes)),
+                                  _InfoRow(label: '今日上传', value: stats.todayUploadLabel),
+                                  _InfoRow(label: '今日下载', value: stats.todayDownloadLabel),
                                   _InfoRow(label: '分享率', value: stats.ratioLabel),
                                   _InfoRow(label: '做种/下载中', value: '${stats.seedingCount} / ${stats.leechingCount}'),
                                   _InfoRow(label: '魔力值', value: '${stats.bonus}'),
@@ -168,6 +196,13 @@ class PtDataPage extends ConsumerWidget {
                                         ? '已签到（连续 ${stats.consecutiveSignInDays} 天）'
                                         : '未签到',
                                   ),
+                                  if (stats.classPlanLabel.isNotEmpty)
+                                    _InfoRow(label: '等级路线', value: stats.classPlanLabel),
+                                  _InfoRow(label: '保种契约', value: stats.contractLabel),
+                                  if (stats.contractNote.isNotEmpty)
+                                    _InfoRow(label: '契约说明', value: stats.contractNote),
+                                  if ((stats.policy?.alternativesLabel ?? '').isNotEmpty)
+                                    _InfoRow(label: '任选条件', value: stats.policy!.alternativesLabel),
                                 ],
                               ),
                             ),

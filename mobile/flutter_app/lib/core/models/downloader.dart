@@ -48,6 +48,7 @@ class DownloaderConfig {
     this.username = '',
     this.credentialConfigured = false,
     this.enabled = true,
+    this.isDefault = false,
     this.defaultSavePath = '',
     this.health = DownloaderHealth.unknown,
     this.lastTestedAt,
@@ -62,6 +63,10 @@ class DownloaderConfig {
   final String username;
   final bool credentialConfigured;
   final bool enabled;
+
+  /// 是否为默认下载器：搜索结果不指定目标时推送到该下载器。
+  /// 同一时刻只允许一个默认下载器（由仓库统一收敛）。
+  final bool isDefault;
 
   /// 该下载器的默认保存目录（推送到该下载器时的默认值）。
   final String defaultSavePath;
@@ -80,6 +85,7 @@ class DownloaderConfig {
     String? username,
     bool? credentialConfigured,
     bool? enabled,
+    bool? isDefault,
     String? defaultSavePath,
     DownloaderHealth? health,
     DateTime? lastTestedAt,
@@ -94,6 +100,7 @@ class DownloaderConfig {
         username: username ?? this.username,
         credentialConfigured: credentialConfigured ?? this.credentialConfigured,
         enabled: enabled ?? this.enabled,
+        isDefault: isDefault ?? this.isDefault,
         defaultSavePath: defaultSavePath ?? this.defaultSavePath,
         health: health ?? this.health,
         lastTestedAt: lastTestedAt ?? this.lastTestedAt,
@@ -109,6 +116,7 @@ class DownloaderConfig {
         'username': username,
         'credentialConfigured': credentialConfigured,
         'enabled': enabled,
+        'isDefault': isDefault,
         'defaultSavePath': defaultSavePath,
         'health': health.name,
         'lastTestedAt': lastTestedAt?.toIso8601String(),
@@ -124,6 +132,7 @@ class DownloaderConfig {
         username: json['username'] as String? ?? '',
         credentialConfigured: json['credentialConfigured'] as bool? ?? false,
         enabled: json['enabled'] as bool? ?? true,
+        isDefault: json['isDefault'] as bool? ?? false,
         defaultSavePath: json['defaultSavePath'] as String? ?? '',
         health: DownloaderHealth.fromName(json['health'] as String?),
         lastTestedAt: _parseDate(json['lastTestedAt']),
@@ -182,6 +191,9 @@ class DownloaderTask {
     this.savePath = '',
     this.category = '',
     this.ratio = 0,
+    this.tags = const <String>[],
+    this.tracker = '',
+    this.addedAt,
   });
 
   /// 任务唯一标识（qBittorrent / Transmission 均为 info hash）。
@@ -198,6 +210,25 @@ class DownloaderTask {
   final String savePath;
   final String category;
   final double ratio;
+
+  /// 标签（qBittorrent 的 tags / Transmission 的 labels）。
+  final List<String> tags;
+
+  /// 当前 tracker 或站点域名，用于「服务器筛选」。
+  final String tracker;
+
+  /// 加入时间；服务端未提供时为 null（排序时统一落到末尾）。
+  final DateTime? addedAt;
+
+  bool get isPaused => state.isPaused;
+
+  /// 服务器（tracker / 站点）展示名：取 tracker 主机名，空则显示未标注。
+  String get serverLabel {
+    if (tracker.isEmpty) return '未标注';
+    final Uri? uri = Uri.tryParse(tracker.contains('://') ? tracker : 'http://$tracker');
+    final String host = uri?.host ?? tracker;
+    return host.isEmpty ? tracker : host;
+  }
 
   double get progress => sizeBytes <= 0 ? 0 : (completedBytes / sizeBytes).clamp(0, 1);
 
@@ -225,8 +256,15 @@ class DownloaderTask {
       uploadSpeed: _num(json, <String>['uploadSpeed', 'upspeed', 'rateUpload']).toInt(),
       etaSeconds: eta == 0 ? -1 : eta,
       savePath: _str(json, <String>['savePath', 'save_path', 'downloadDir', 'dir']),
+      // Transmission 没有独立分类，其 labels 同时充当分类与标签，两个字段都填。
       category: _str(json, <String>['category', 'labels', 'tag']),
       ratio: _num(json, <String>['ratio', 'uploadRatio']).toDouble(),
+      tags: _strList(json, <String>['tags', 'labels']),
+      tracker: _str(json, <String>['tracker', 'trackerHost', 'siteName', 'site']),
+      addedAt: _parseDate(
+        json['addedAt'] ?? json['addedOn'] ?? json['addedTime'] ?? json['added_time'] ??
+            json['additionDate'] ?? json['dateAdded'],
+      ),
     );
   }
 
@@ -250,6 +288,156 @@ class DownloaderTask {
     }
     return '';
   }
+
+  /// 多值字段（标签可能以数组、逗号串或单个字符串给出）。
+  static List<String> _strList(Map<String, dynamic> json, List<String> keys) {
+    for (final String key in keys) {
+      final Object? value = json[key];
+      if (value is List) {
+        return value
+            .map((Object? item) => item.toString().trim())
+            .where((String item) => item.isNotEmpty)
+            .toList(growable: false);
+      }
+      if (value is String && value.trim().isNotEmpty) {
+        return value
+            .split(',')
+            .map((String item) => item.trim())
+            .where((String item) => item.isNotEmpty)
+            .toList(growable: false);
+      }
+    }
+    return const <String>[];
+  }
 }
 
-DateTime? _parseDate(Object? value) => value is String ? DateTime.tryParse(value) : null;
+/// 任务排序字段。
+enum TaskSort {
+  addedAt('加入时间'),
+  name('名称'),
+  size('大小'),
+  progress('进度'),
+  downloadSpeed('下载速度'),
+  eta('剩余时间');
+
+  const TaskSort(this.label);
+
+  final String label;
+
+  static TaskSort fromName(String? value) => values.firstWhere(
+        (TaskSort s) => s.name == value,
+        orElse: () => TaskSort.addedAt,
+      );
+}
+
+/// 任务列表的筛选 / 排序条件（纯数据，便于单测）。
+class TaskQuery {
+  const TaskQuery({
+    this.statuses = const <TaskState>{},
+    this.tracker = '',
+    this.sort = TaskSort.addedAt,
+    this.descending = true,
+  });
+
+  /// 选中的状态集合；空集表示「全部状态」。
+  final Set<TaskState> statuses;
+
+  /// 选中的服务器（tracker / 站点域名）；空串表示「全部服务器」。
+  final String tracker;
+
+  final TaskSort sort;
+
+  /// 是否倒序（默认：新加入在前）。
+  final bool descending;
+
+  bool get isEmptyFilter => statuses.isEmpty && tracker.isEmpty;
+
+  TaskQuery copyWith({
+    Set<TaskState>? statuses,
+    String? tracker,
+    TaskSort? sort,
+    bool? descending,
+  }) =>
+      TaskQuery(
+        statuses: statuses ?? this.statuses,
+        tracker: tracker ?? this.tracker,
+        sort: sort ?? this.sort,
+        descending: descending ?? this.descending,
+      );
+
+  /// 过滤 + 排序。纯函数，供页面与单测共用同一口径。
+  List<DownloaderTask> apply(List<DownloaderTask> tasks) {
+    final List<DownloaderTask> filtered = tasks
+        .where((DownloaderTask task) =>
+            (statuses.isEmpty || statuses.contains(task.state)) &&
+            (tracker.isEmpty || task.tracker == tracker))
+        .toList();
+
+    int compare(DownloaderTask a, DownloaderTask b) {
+      final int result = switch (sort) {
+        TaskSort.addedAt => (a.addedAt ?? DateTime.fromMillisecondsSinceEpoch(0))
+            .compareTo(b.addedAt ?? DateTime.fromMillisecondsSinceEpoch(0)),
+        TaskSort.name => a.name.compareTo(b.name),
+        TaskSort.size => a.sizeBytes.compareTo(b.sizeBytes),
+        TaskSort.progress => a.progress.compareTo(b.progress),
+        TaskSort.downloadSpeed => a.downloadSpeed.compareTo(b.downloadSpeed),
+        TaskSort.eta => a.etaSeconds.compareTo(b.etaSeconds),
+      };
+      // 排序键相同时用名称兜底，保证结果稳定（否则同键项顺序随机跳变）。
+      return result != 0 ? result : a.name.compareTo(b.name);
+    }
+
+    filtered.sort((DownloaderTask a, DownloaderTask b) =>
+        descending ? compare(b, a) : compare(a, b));
+    return filtered;
+  }
+}
+
+/// 下载器可选值（分类 / 标签 / 路径），供任务批量操作的选择器使用。
+///
+/// 由后端一次下发，避免在页面上拼三次请求；字段缺失时按空列表处理。
+class DownloaderTaskOption {
+  const DownloaderTaskOption({
+    this.categories = const <String>[],
+    this.tags = const <String>[],
+    this.paths = const <String>[],
+  });
+
+  final List<String> categories;
+  final List<String> tags;
+  final List<String> paths;
+
+  factory DownloaderTaskOption.fromJson(Map<String, dynamic> json) => DownloaderTaskOption(
+        categories: _stringList(json['categories']),
+        tags: _stringList(json['tags']),
+        paths: _stringList(json['paths']),
+      );
+
+  static List<String> _stringList(Object? value) {
+    if (value is! List) return const <String>[];
+    return value
+        .map((Object? item) => item.toString().trim())
+        .where((String item) => item.isNotEmpty)
+        .toList(growable: false);
+  }
+}
+
+/// 宽松解析时间：兼容 ISO 字符串与各引擎给出的 epoch（秒或毫秒）数字。
+///
+/// qBittorrent 的 `added_on` / Transmission 的 `addedDate` 都是 epoch 秒，
+/// 只按 ISO 字符串解析会把「加入时间」整列丢掉，排序随之失真。
+DateTime? _parseDate(Object? value) {
+  if (value is num) {
+    final int raw = value.toInt();
+    if (raw <= 0) return null;
+    return DateTime.fromMillisecondsSinceEpoch(raw > 100000000000 ? raw : raw * 1000);
+  }
+  if (value is String) {
+    final String text = value.trim();
+    if (text.isEmpty) return null;
+    final int? epoch = int.tryParse(text);
+    if (epoch != null) return _parseDate(epoch);
+    return DateTime.tryParse(text);
+  }
+  return null;
+}

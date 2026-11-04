@@ -11,9 +11,15 @@ import '../network/api_exception.dart';
 ///
 /// 契约：
 /// - `GET  /api/v1/downloaders/{id}/tasks` → 归一化任务数组；
+/// - `GET  /api/v1/downloaders/{id}/task-options` → `{categories, tags, paths}`；
 /// - `POST /api/v1/downloaders/{id}/tasks/pause`  body `{hashes:[...]}`；
 /// - `POST /api/v1/downloaders/{id}/tasks/resume` body `{hashes:[...]}`；
-/// - `POST /api/v1/downloaders/{id}/tasks/remove` body `{hashes:[...], deleteFiles:bool}`。
+/// - `POST /api/v1/downloaders/{id}/tasks/remove` body `{hashes:[...], deleteFiles:bool}`；
+/// - `POST /api/v1/downloaders/{id}/tasks/category` body `{hashes:[...], category}`；
+/// - `POST /api/v1/downloaders/{id}/tasks/tags`     body `{hashes:[...], tags:[...], mode}`；
+/// - `POST /api/v1/downloaders/{id}/tasks/location` body `{hashes:[...], savePath}`。
+///
+/// `mode` 取 `add`（默认，追加标签）/ `remove`（移除这些标签）/ `set`（覆盖为这些标签）。
 class DownloaderApi {
   DownloaderApi({required this.client});
 
@@ -48,6 +54,41 @@ class DownloaderApi {
       client.post<void>(
         '$prefix/$downloaderId/tasks/remove',
         data: <String, dynamic>{'hashes': hashes, 'deleteFiles': deleteFiles},
+      );
+
+  /// 可选分类 / 标签 / 路径；后端未实现该接口时按空列表处理，不影响任务列表。
+  Future<DownloaderTaskOption> fetchTaskOptions(String downloaderId) async {
+    final Response<dynamic> response =
+        await client.get<dynamic>('$prefix/$downloaderId/task-options');
+    final Object? data = response.data;
+    if (data is Map<String, dynamic>) return DownloaderTaskOption.fromJson(data);
+    return const DownloaderTaskOption();
+  }
+
+  /// 更改分类（空串表示清除分类）。
+  Future<void> setCategory(String downloaderId, List<String> hashes, String category) =>
+      client.post<void>(
+        '$prefix/$downloaderId/tasks/category',
+        data: <String, dynamic>{'hashes': hashes, 'category': category},
+      );
+
+  /// 标签操作；[mode] 见类注释。
+  Future<void> setTags(
+    String downloaderId,
+    List<String> hashes,
+    List<String> tags, {
+    String mode = 'add',
+  }) =>
+      client.post<void>(
+        '$prefix/$downloaderId/tasks/tags',
+        data: <String, dynamic>{'hashes': hashes, 'tags': tags, 'mode': mode},
+      );
+
+  /// 更改保存路径。
+  Future<void> setLocation(String downloaderId, List<String> hashes, String savePath) =>
+      client.post<void>(
+        '$prefix/$downloaderId/tasks/location',
+        data: <String, dynamic>{'hashes': hashes, 'savePath': savePath},
       );
 
   Future<void> _taskAction(String downloaderId, String action, List<String> hashes) =>

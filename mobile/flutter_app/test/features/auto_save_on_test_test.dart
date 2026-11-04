@@ -28,6 +28,10 @@ SiteReachabilityProbe _probeReturning(SiteProbeResult result) => SiteReachabilit
       probe: (Uri baseUrl, Duration timeout) async => result,
     );
 
+/// 地址录入组件的主机 / 端口输入框（见 [AddressInput.keyPrefix]）。
+Finder _hostField(String prefix) => find.byKey(ValueKey<String>('$prefix.host'));
+Finder _portField(String prefix) => find.byKey(ValueKey<String>('$prefix.port'));
+
 Future<ProviderContainer> _container(
   SharedPreferences prefs,
   List<Override> overrides,
@@ -40,6 +44,13 @@ Future<ProviderContainer> _container(
   );
   // 让 AsyncNotifierProvider 完成首次构建。
   return container;
+}
+
+Future<void> _settleAfterAction(WidgetTester tester) async {
+  // 录入阶段的延时探测用的是 Timer，pumpAndSettle 只等帧不等 Timer，
+  // 这里显式推进一段时间，避免测试结束时留下未触发的定时器。
+  await tester.pump(const Duration(seconds: 1));
+  await tester.pumpAndSettle();
 }
 
 void main() {
@@ -84,11 +95,13 @@ void main() {
       addTearDown(container.dispose);
       await pumpPage(tester, container, const DownloaderAddPage());
 
-      final Finder fields = find.byType(TextFormField);
-      await tester.enterText(fields.at(0), '主力 qB');
-      await tester.enterText(fields.at(1), 'http://192.168.1.10:8080');
+      // 地址按「协议 + 主机 + 端口」分开录入，因此按 Key 定位而不是按顺序取输入框。
+      await tester.enterText(find.byType(TextFormField).at(0), '主力 qB');
+      await tester.enterText(_hostField('downloader'), '192.168.1.10');
+      await tester.enterText(_portField('downloader'), '8080');
       await tester.tap(find.text('测试连接'));
       await tester.pumpAndSettle();
+      await _settleAfterAction(tester);
 
       final List<DownloaderConfig> list =
           container.read(downloaderListProvider).valueOrNull ?? const <DownloaderConfig>[];
@@ -109,17 +122,20 @@ void main() {
       addTearDown(container.dispose);
       await pumpPage(tester, container, const DownloaderAddPage());
 
-      final Finder fields = find.byType(TextFormField);
-      await tester.enterText(fields.at(0), '备用 tr');
-      await tester.enterText(fields.at(1), 'tr.example:9091');
+      await tester.enterText(find.byType(TextFormField).at(0), '备用 tr');
+      await tester.enterText(_hostField('downloader'), 'tr.example');
+      await tester.enterText(_portField('downloader'), '9091');
       await tester.tap(find.text('测试连接'));
       await tester.pumpAndSettle();
+      await _settleAfterAction(tester);
       await tester.tap(find.text('测试连接'));
       await tester.pumpAndSettle();
+      await _settleAfterAction(tester);
 
       final List<DownloaderConfig> list =
           container.read(downloaderListProvider).valueOrNull ?? const <DownloaderConfig>[];
       expect(list, hasLength(1));
+      expect(list.single.baseUrl, 'http://tr.example:9091');
       expect(list.single.health, DownloaderHealth.ok);
     });
   });
@@ -134,12 +150,16 @@ void main() {
       addTearDown(container.dispose);
       await pumpPage(tester, container, const MpAddPage());
 
-      final Finder fields = find.byType(TextFormField);
-      await tester.enterText(fields.at(0), '家宽 MP');
-      await tester.enterText(fields.at(1), 'http://192.168.1.10:3000');
-      await tester.enterText(fields.at(2), 'https://mp.example.com:5888');
+      await tester.enterText(find.byType(TextFormField).at(0), '家宽 MP');
+      await tester.enterText(_hostField('mp.lan'), '192.168.1.10');
+      // 内外网改成一个地址区 + 左侧切换：切到「外网」再填外网地址。
+      await tester.tap(find.text('外网'));
+      await tester.pumpAndSettle();
+      await tester.enterText(_hostField('mp.wan'), 'mp.example.com');
+      await tester.enterText(_portField('mp.wan'), '5888');
       await tester.tap(find.text('测试两条通道'));
       await tester.pumpAndSettle();
+      await _settleAfterAction(tester);
 
       final List<MpInstance> list =
           container.read(mpListProvider).valueOrNull ?? const <MpInstance>[];
@@ -166,6 +186,7 @@ void main() {
       await tester.enterText(fields.at(1), 'https://site.example');
       await tester.tap(find.text('测试连接'));
       await tester.pumpAndSettle();
+      await _settleAfterAction(tester);
 
       final List<PtSite> sites =
           container.read(siteListProvider).valueOrNull ?? const <PtSite>[];
@@ -185,11 +206,16 @@ void main() {
       addTearDown(container.dispose);
       await pumpPage(tester, container, const ConnectionSettingsPage());
 
-      final Finder fields = find.byType(TextField);
-      await tester.enterText(fields.at(0), 'http://192.168.1.10:8000');
-      await tester.enterText(fields.at(1), 'https://nas.example.com:5888');
-      await tester.tap(find.text('测试两条通道'));
+      await tester.enterText(_hostField('endpoint.lan'), '192.168.1.10');
+      await tester.enterText(_portField('endpoint.lan'), '8000');
+      // 内外网改成一个地址区 + 左侧切换：切到「外网」再填外网地址。
+      await tester.tap(find.text('外网'));
       await tester.pumpAndSettle();
+      await tester.enterText(_hostField('endpoint.wan'), 'nas.example.com');
+      await tester.enterText(_portField('endpoint.wan'), '5888');
+      await tester.tap(find.text('重新检测两条通道'));
+      await tester.pumpAndSettle();
+      await _settleAfterAction(tester);
 
       final EndpointProfile profile = container.read(endpointProfileProvider);
       expect(profile.lanBaseUrl.toString(), 'http://192.168.1.10:8000');

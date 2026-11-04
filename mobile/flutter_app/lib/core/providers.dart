@@ -11,9 +11,11 @@ import 'network/interceptors.dart';
 import 'network/link_supervisor.dart';
 import 'network/proxy_runtime.dart';
 import 'network/url_utils.dart';
+import 'services/site_reachability_probe.dart';
 import 'storage/app_keys.dart';
 import 'storage/config_inheritance.dart';
 import 'storage/prefs_store.dart';
+import 'storage/probe_result_store.dart';
 import 'storage/secure_store.dart';
 
 /// SharedPreferences 实例由 main() 在启动时注入（overrides），保证同步可读。
@@ -36,6 +38,12 @@ final Provider<ConfigInheritanceService> configInheritanceProvider =
     prefs: ref.watch(prefsStoreProvider),
     secure: ref.watch(secureStoreProvider),
   ),
+);
+
+/// 可达性探测结果存储：让「上次连通状态」在重新进入页面时依然可见，
+/// 而不是一律退化成「未检测」。
+final Provider<ProbeResultStore> probeResultStoreProvider = Provider<ProbeResultStore>(
+  (Ref ref) => ProbeResultStore(prefs: ref.watch(prefsStoreProvider)),
 );
 
 /// NAS 会话令牌（异步读取安全存储）。
@@ -96,6 +104,15 @@ class EndpointProfileNotifier extends Notifier<EndpointProfile> {
 /// 健康探测实现（独立最小 Dio，避免循环依赖；不套用代理，保证探测结果真实）。
 final Provider<HttpHealthProbe> healthProbeProvider = Provider<HttpHealthProbe>(
   (Ref ref) => HttpHealthProbe(),
+);
+
+/// 通用地址可达性探测（站点 / CookieCloud 等只验证「地址通不通」的入口）。
+///
+/// 与下载器、MoviePilot 的探测同一实现，差别只在探测目标；
+/// 走业务 Dio（含代理设置），与真实请求链路保持一致。
+final Provider<SiteReachabilityProbe> siteReachabilityProbeProvider =
+    Provider<SiteReachabilityProbe>(
+  (Ref ref) => SiteReachabilityProbe(dio: ref.watch(proxyRuntimeProvider).createDio()),
 );
 
 /// 双链路解析器：随地址档案或链路模式变化自动重建。

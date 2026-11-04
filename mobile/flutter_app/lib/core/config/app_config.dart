@@ -19,7 +19,7 @@ enum AppEnvironment {
 
 abstract final class AppConfig {
   static const String appName = 'PT Pocket';
-  static const String appVersionFallback = '0.7.1';
+  static const String appVersionFallback = '0.7.2';
 
   /// NAS 后端 API 版本与前缀（版本化 API，移动端不直连数据库/Redis）。
   static const String apiVersion = 'v1';
@@ -57,7 +57,7 @@ abstract final class AppConfig {
   /// 配置 schema 版本：升级迭代时用于触发配置迁移与继承（需求 #17）。
   /// 每次破坏性或结构性配置变更时 +1，并在 ConfigInheritanceService 注册迁移。
   /// v4：MoviePilot 实例由单一地址升级为内网 / 外网双地址。
-  static const int configSchemaVersion = 4;
+  static const int configSchemaVersion = 5;
 
   /// 默认代理设置占位（旁路由代理，需求 #13：UI 在 P1 提供）。
   static const bool defaultProxyEnabled = false;

@@ -4,6 +4,8 @@
 /// 移动端只消费归一化结果并下发操作（规格书 §7.1）。
 library;
 
+import '../utils/format.dart';
+
 /// 站点养老（保号）状态。
 enum CareState {
   healthy('健康'),
@@ -28,6 +30,8 @@ class SiteCarePolicy {
     this.minimumSeedingDays,
     this.minimumUploadBytes,
     this.requiresSignIn = true,
+    this.alternatives = const <String>[],
+    this.satisfiedAlternative = '',
     this.note = '',
   });
 
@@ -35,6 +39,13 @@ class SiteCarePolicy {
   final int? minimumSeedingDays;
   final int? minimumUploadBytes;
   final bool requiresSignIn;
+
+  /// 任选条件（满足其中**任一项**即可达标，参考插件对「任选条件」的口径）。
+  final List<String> alternatives;
+
+  /// 当前已命中的那个任选条件（为空表示都没满足）。
+  final String satisfiedAlternative;
+
   final String note;
 
   /// 人类可读的要求摘要。
@@ -44,8 +55,19 @@ class SiteCarePolicy {
     if (minimumSeedingDays != null) parts.add('做种 ≥ ${minimumSeedingDays!} 天');
     if (minimumUploadBytes != null) parts.add('上传量需达标');
     if (requiresSignIn) parts.add('需保持签到');
-    if (parts.isEmpty) return note.isEmpty ? '站点未提供明确的保号要求' : note;
+    if (parts.isEmpty) {
+      if (alternatives.isNotEmpty) return '任选其一：${alternatives.join(' / ')}';
+      return note.isEmpty ? '站点未提供明确的保号要求' : note;
+    }
     return parts.join('；');
+  }
+
+  /// 任选条件的一句话说明（含当前是否已满足）。
+  String get alternativesLabel {
+    if (alternatives.isEmpty) return '';
+    final String joined = alternatives.join(' / ');
+    if (satisfiedAlternative.isEmpty) return '任选其一（当前均未满足）：$joined';
+    return '任选其一（当前已满足「$satisfiedAlternative」）：$joined';
   }
 
   Map<String, dynamic> toJson() => <String, dynamic>{
@@ -53,6 +75,8 @@ class SiteCarePolicy {
         'minimumSeedingDays': minimumSeedingDays,
         'minimumUploadBytes': minimumUploadBytes,
         'requiresSignIn': requiresSignIn,
+        'alternatives': alternatives,
+        'satisfiedAlternative': satisfiedAlternative,
         'note': note,
       };
 
@@ -61,8 +85,54 @@ class SiteCarePolicy {
         minimumSeedingDays: (json['minimumSeedingDays'] as num?)?.toInt(),
         minimumUploadBytes: (json['minimumUploadBytes'] as num?)?.toInt(),
         requiresSignIn: json['requiresSignIn'] as bool? ?? true,
+        alternatives: (json['alternatives'] is List)
+            ? (json['alternatives'] as List<dynamic>)
+                .map((Object? item) => item.toString())
+                .where((String item) => item.isNotEmpty)
+                .toList(growable: false)
+            : const <String>[],
+        satisfiedAlternative: json['satisfiedAlternative']?.toString() ?? '',
         note: json['note'] as String? ?? '',
       );
+}
+
+/// 站点数据刷新状态（站点页四态筛选的唯一口径）。
+///
+/// 判定由后端给出（参考 seedstats 的「数据过期 + 零做种」告警口径），App 只渲染：
+/// - [refreshed]：本次刷新成功且数据在阈值内；
+/// - [stale]：从未成功刷新，或上一次刷新已超过阈值；
+/// - [failed]：最近一次刷新失败，[SiteStats.refreshMessage] 给出原因；
+/// - [notLoggedIn]：凭据缺失 / 失效，需要重新登录或导入 Cookie。
+enum SiteRefreshState {
+  refreshed('已刷新'),
+  stale('未刷新'),
+  failed('失败'),
+  notLoggedIn('未登录'),
+  unknown('未检测');
+
+  const SiteRefreshState(this.label);
+
+  final String label;
+
+  static SiteRefreshState fromName(String? value) {
+    final String key = (value ?? '').replaceAll(RegExp(r'[^A-Za-z]'), '').toLowerCase();
+    return switch (key) {
+      'refreshed' || 'fresh' || 'ok' || 'success' || 'succeeded' => SiteRefreshState.refreshed,
+      'stale' || 'never' || 'outdated' || 'expired' => SiteRefreshState.stale,
+      'failed' || 'fail' || 'error' => SiteRefreshState.failed,
+      'notloggedin' || 'unauthorized' || 'loginrequired' || 'expiredcredentials' =>
+        SiteRefreshState.notLoggedIn,
+      _ => SiteRefreshState.unknown,
+    };
+  }
+
+  /// 面板筛选用到的四态（[unknown] 只在「全部」里出现）。
+  static const List<SiteRefreshState> filterable = <SiteRefreshState>[
+    SiteRefreshState.refreshed,
+    SiteRefreshState.stale,
+    SiteRefreshState.failed,
+    SiteRefreshState.notLoggedIn,
+  ];
 }
 
 /// 单个站点的数据统计与养老进度。
@@ -72,11 +142,17 @@ class SiteStats {
     required this.siteName,
     this.username = '',
     this.userClass = '',
+    this.iconUrl = '',
     this.uploadedBytes = 0,
     this.downloadedBytes = 0,
     this.bonus = 0,
+    this.hourlyBonus = 0,
     this.seedingCount = 0,
     this.leechingCount = 0,
+    this.connections = 0,
+    this.hrCount = 0,
+    this.unreadMessages = 0,
+    this.invites = 0,
     this.joinDate,
     this.ratioOverride,
     this.signedInToday = false,
@@ -84,19 +160,48 @@ class SiteStats {
     this.careState = CareState.unknown,
     this.careProgress = 0,
     this.policy,
+    this.refreshState = SiteRefreshState.unknown,
+    this.refreshMessage = '',
+    this.refreshedAt,
+    this.todayUploadedBytes = 0,
+    this.todayDownloadedBytes = 0,
+    this.todayBaselineAvailable = false,
+    this.nextClass = '',
+    this.nextClassRequirement = '',
+    this.contractMet,
+    this.contractNote = '',
   });
 
   final String siteId;
   final String siteName;
   final String username;
   final String userClass;
+
+  /// 站点图标地址（后端可选下发）；为空时站点页用站点名首字生成图标。
+  final String iconUrl;
   final int uploadedBytes;
   final int downloadedBytes;
 
   /// 魔力值 / 积分（各站口径不同，仅作展示）。
   final int bonus;
+
+  /// 综合时魔：每小时魔力收益（站点口径不一，按后端估算展示）。
+  final double hourlyBonus;
   final int seedingCount;
   final int leechingCount;
+
+  /// 当前连接数（做种 + 下载中的连接总量）。
+  final int connections;
+
+  /// H&R / 保种契约未完成的数量；0 表示当前无 HR。
+  final int hrCount;
+
+  /// 未读邮件（站内信）数量。
+  final int unreadMessages;
+
+  /// 可邀请名额。
+  final int invites;
+
   final DateTime? joinDate;
 
   /// 站点直接给出的分享率；缺省时由上传/下载计算。
@@ -109,21 +214,85 @@ class SiteStats {
   final double careProgress;
   final SiteCarePolicy? policy;
 
+  /// 数据刷新状态与最近一次刷新结论。
+  final SiteRefreshState refreshState;
+  final String refreshMessage;
+  final DateTime? refreshedAt;
+
+  /// 今日增量：当日累计 − 前一自然日累计（由后端计算）。
+  final int todayUploadedBytes;
+  final int todayDownloadedBytes;
+
+  /// 是否有前一自然日的快照作为基线。**没有基线时今日增量不可计算**，
+  /// 必须显示「基线不足」，而不是拿 0 冒充「今天没涨」。
+  final bool todayBaselineAvailable;
+
+  /// 等级路线：下一等级与达成条件。
+  final String nextClass;
+  final String nextClassRequirement;
+
+  /// 保种契约（H&R / 契约检查）是否达成；null 表示后端未提供该项。
+  final bool? contractMet;
+  final String contractNote;
+
+  /// 今日上传文本；缺基线时明确写「基线不足」。
+  String get todayUploadLabel =>
+      todayBaselineAvailable ? formatBytes(todayUploadedBytes) : '基线不足';
+
+  String get todayDownloadLabel =>
+      todayBaselineAvailable ? formatBytes(todayDownloadedBytes) : '基线不足';
+
+  /// 等级路线文本（空表示站点未提供等级信息）。
+  String get classPlanLabel {
+    if (nextClass.isEmpty) return '';
+    if (nextClassRequirement.isEmpty) return '下一等级：$nextClass';
+    return '下一等级：$nextClass（$nextClassRequirement）';
+  }
+
+  /// 契约达成文本；后端未提供时为「数据未提供」。
+  String get contractLabel {
+    if (contractMet == null) return '数据未提供';
+    if (contractMet!) return '已达成';
+    return hrCount > 0 ? '未达成（$hrCount 项）' : '未达成';
+  }
+
   double? get ratio =>
       ratioOverride ?? (downloadedBytes > 0 ? uploadedBytes / downloadedBytes : null);
 
   String get ratioLabel => ratio == null ? '—' : ratio!.toStringAsFixed(2);
+
+  /// 站点图标回退用的首字（中文取第一个字，英文取首字母大写）。
+  String get iconLetter {
+    final String name = siteName.trim();
+    if (name.isEmpty) return '?';
+    return name.substring(0, 1).toUpperCase();
+  }
+
+  String get hourlyBonusLabel =>
+      hourlyBonus > 0 ? '${hourlyBonus.toStringAsFixed(2)}/h' : '—';
+
+  String get hrLabel => hrCount > 0 ? '$hrCount 项' : '无';
+
+  /// 签到情况：今日已签 + 连续天数。
+  String get signInLabel =>
+      signedInToday ? (consecutiveSignInDays > 0 ? '已签 · 连续 $consecutiveSignInDays 天' : '已签') : '未签';
 
   Map<String, dynamic> toJson() => <String, dynamic>{
         'siteId': siteId,
         'siteName': siteName,
         'username': username,
         'userClass': userClass,
+        'iconUrl': iconUrl,
         'uploadedBytes': uploadedBytes,
         'downloadedBytes': downloadedBytes,
         'bonus': bonus,
+        'hourlyBonus': hourlyBonus,
         'seedingCount': seedingCount,
         'leechingCount': leechingCount,
+        'connections': connections,
+        'hrCount': hrCount,
+        'unreadMessages': unreadMessages,
+        'invites': invites,
         'joinDate': joinDate?.toIso8601String(),
         'ratioOverride': ratioOverride,
         'signedInToday': signedInToday,
@@ -131,18 +300,35 @@ class SiteStats {
         'careState': careState.name,
         'careProgress': careProgress,
         'policy': policy?.toJson(),
+        'refreshState': refreshState.name,
+        'refreshMessage': refreshMessage,
+        'refreshedAt': refreshedAt?.toIso8601String(),
+        'todayUploadedBytes': todayUploadedBytes,
+        'todayDownloadedBytes': todayDownloadedBytes,
+        'todayBaselineAvailable': todayBaselineAvailable,
+        'nextClass': nextClass,
+        'nextClassRequirement': nextClassRequirement,
+        'contractMet': contractMet,
+        'contractNote': contractNote,
       };
 
+  /// 解析后端返回；缺失字段一律按「未提供」处理，不填 0 冒充真实数据。
   factory SiteStats.fromJson(Map<String, dynamic> json) => SiteStats(
         siteId: json['siteId']?.toString() ?? json['id']?.toString() ?? '',
         siteName: json['siteName']?.toString() ?? json['name']?.toString() ?? '',
         username: json['username']?.toString() ?? '',
         userClass: json['userClass']?.toString() ?? json['class']?.toString() ?? '',
+        iconUrl: json['iconUrl']?.toString() ?? json['icon']?.toString() ?? '',
         uploadedBytes: _int(json['uploadedBytes'] ?? json['uploaded']),
         downloadedBytes: _int(json['downloadedBytes'] ?? json['downloaded']),
         bonus: _int(json['bonus'] ?? json['points']),
+        hourlyBonus: _double(json['hourlyBonus'] ?? json['hourlyBonusPoints'] ?? json['bonusPerHour']),
         seedingCount: _int(json['seedingCount'] ?? json['seeding']),
         leechingCount: _int(json['leechingCount'] ?? json['leeching']),
+        connections: _int(json['connections'] ?? json['peers']),
+        hrCount: _int(json['hrCount'] ?? json['hr'] ?? json['hitAndRun']),
+        unreadMessages: _int(json['unreadMessages'] ?? json['messages'] ?? json['mail']),
+        invites: _int(json['invites'] ?? json['inviteCount']),
         joinDate: _date(json['joinDate'] ?? json['registeredAt']),
         ratioOverride: (json['ratio'] as num?)?.toDouble(),
         signedInToday: json['signedInToday'] as bool? ?? false,
@@ -152,16 +338,63 @@ class SiteStats {
         policy: json['policy'] is Map<String, dynamic>
             ? SiteCarePolicy.fromJson(json['policy'] as Map<String, dynamic>)
             : null,
+        refreshState: SiteRefreshState.fromName(
+          json['refreshState']?.toString() ?? json['state']?.toString(),
+        ),
+        refreshMessage: json['refreshMessage']?.toString() ?? json['errMsg']?.toString() ?? '',
+        refreshedAt: _date(json['refreshedAt'] ?? json['updatedAt']),
+        todayUploadedBytes: _int(json['todayUploadedBytes'] ?? json['todayUploaded']),
+        todayDownloadedBytes: _int(json['todayDownloadedBytes'] ?? json['todayDownloaded']),
+        // 缺基线时后端给 false / 缺省；只有显式 true 才算有基线。
+        todayBaselineAvailable: json['todayBaselineAvailable'] as bool? ?? false,
+        nextClass: json['nextClass']?.toString() ?? '',
+        nextClassRequirement: json['nextClassRequirement']?.toString() ?? '',
+        contractMet: json['contractMet'] as bool?,
+        contractNote: json['contractNote']?.toString() ?? '',
       );
+}
+
+double _double(Object? value) {
+  if (value is num) return value.toDouble();
+  if (value is String) return double.tryParse(value) ?? 0;
+  return 0;
 }
 
 /// 个人 PT 数据快照（数据统计与历程）。
 class PtDataSnapshot {
-  const PtDataSnapshot({required this.sites, this.generatedAt, this.notice = ''});
+  const PtDataSnapshot({
+    required this.sites,
+    this.generatedAt,
+    this.notice = '',
+    this.todayUploadedBytes,
+    this.todayDownloadedBytes,
+    this.todayBaselineAvailable,
+  });
 
   final List<SiteStats> sites;
   final DateTime? generatedAt;
   final String notice;
+
+  /// 今日总量增量。后端给了就用后端的；没给则按各站增量求和（口径一致）。
+  final int? todayUploadedBytes;
+  final int? todayDownloadedBytes;
+
+  /// 是否有基线；后端未给时按「所有站点都有基线」推断。
+  final bool? todayBaselineAvailable;
+
+  bool get hasTodayBaseline =>
+      todayBaselineAvailable ?? (sites.isNotEmpty && sites.every((SiteStats s) => s.todayBaselineAvailable));
+
+  int get todayUploaded =>
+      todayUploadedBytes ?? sites.fold(0, (int sum, SiteStats s) => sum + s.todayUploadedBytes);
+
+  int get todayDownloaded =>
+      todayDownloadedBytes ?? sites.fold(0, (int sum, SiteStats s) => sum + s.todayDownloadedBytes);
+
+  /// 今日上传文本；缺基线时写「基线不足」（不拿 0 冒充）。
+  String get todayUploadLabel => hasTodayBaseline ? formatBytes(todayUploaded) : '基线不足';
+
+  String get todayDownloadLabel => hasTodayBaseline ? formatBytes(todayDownloaded) : '基线不足';
 
   int get siteCount => sites.length;
 
@@ -192,6 +425,13 @@ class PtDataSnapshot {
       sites: sites,
       generatedAt: _date(json['generatedAt']),
       notice: json['notice']?.toString() ?? '',
+      todayUploadedBytes: json['todayUploadedBytes'] == null
+          ? null
+          : _int(json['todayUploadedBytes'] ?? json['todayUploaded']),
+      todayDownloadedBytes: json['todayDownloadedBytes'] == null
+          ? null
+          : _int(json['todayDownloadedBytes'] ?? json['todayDownloaded']),
+      todayBaselineAvailable: json['todayBaselineAvailable'] as bool?,
     );
   }
 }
@@ -269,6 +509,37 @@ class MonitorEvent {
 }
 
 /// 单站签到记录。
+/// 签到方式：参考实现把站点分成「签到站点」与「仅模拟登录站点」两类
+/// （有些站不定义签到，只能用模拟登录维持账号活跃），移动端按同一口径区分。
+enum SignInMode {
+  both('签到 + 模拟登录', 'both'),
+  signin('仅签到', 'signin'),
+  login('仅模拟登录', 'login');
+
+  const SignInMode(this.label, this.apiValue);
+
+  final String label;
+  final String apiValue;
+
+  static SignInMode fromName(String? value) => values.firstWhere(
+        (SignInMode m) => m.apiValue == value,
+        orElse: () => SignInMode.both,
+      );
+}
+
+/// 单站动作类型（结果里区分这次是签到还是模拟登录）。
+enum SignInAction {
+  signin('签到'),
+  login('模拟登录');
+
+  const SignInAction(this.label);
+
+  final String label;
+
+  static SignInAction fromName(String? value) =>
+      value == 'login' ? SignInAction.login : SignInAction.signin;
+}
+
 class SignInRecord {
   const SignInRecord({
     required this.siteId,
@@ -276,6 +547,7 @@ class SignInRecord {
     required this.success,
     this.message = '',
     this.signedAt,
+    this.action = SignInAction.signin,
   });
 
   final String siteId;
@@ -284,12 +556,18 @@ class SignInRecord {
   final String message;
   final DateTime? signedAt;
 
+  /// 这次做的是签到还是模拟登录。
+  final SignInAction action;
+
   factory SignInRecord.fromJson(Map<String, dynamic> json) => SignInRecord(
         siteId: json['siteId']?.toString() ?? '',
         siteName: json['siteName']?.toString() ?? '',
         success: json['success'] as bool? ?? false,
         message: json['message']?.toString() ?? '',
         signedAt: _date(json['signedAt'] ?? json['time']),
+        action: SignInAction.fromName(
+          json['action']?.toString() ?? json['mode']?.toString() ?? json['type']?.toString(),
+        ),
       );
 }
 

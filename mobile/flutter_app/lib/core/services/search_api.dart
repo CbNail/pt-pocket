@@ -13,6 +13,11 @@ import '../network/api_exception.dart';
 ///
 /// 站点并发检索、跨站去重、凭据携带与下载地址抓取全部由 NAS 后端完成（规格书 §7.1），
 /// 移动端不直连站点页面。
+///
+/// 实时展示的实现方式：把一次「全量搜索」拆成**逐站请求**（`siteIds` 只放一个站点），
+/// 每站返回就立刻并入结果列表——这样搜索结果边搜边出，不必等最慢的站点。
+/// 这与参考实现（PT-depiler）在浏览器里按站点并发查询、逐站回填的做法一致，
+/// 且完全落在现有契约上，不需要后端额外支持流式接口。
 class SearchApi {
   SearchApi({required this.client});
 
@@ -21,9 +26,13 @@ class SearchApi {
   static const String searchPath = '/api/v1/search';
   static const String pushPath = '/api/v1/torrents/push';
 
-  Future<SearchPageResult> search(SearchRequest request) async {
-    final Response<dynamic> response =
-        await client.post<dynamic>(searchPath, data: request.toJson());
+  /// 聚合搜索。[cancelToken] 用于「中途停止」——实时展示时同一批请求要能一起取消。
+  Future<SearchPageResult> search(SearchRequest request, {CancelToken? cancelToken}) async {
+    final Response<dynamic> response = await client.post<dynamic>(
+      searchPath,
+      data: request.toJson(),
+      cancelToken: cancelToken,
+    );
     final Object? data = response.data;
     if (data == null) {
       return SearchPageResult(

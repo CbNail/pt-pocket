@@ -100,6 +100,12 @@ class DownloaderListNotifier extends AsyncNotifier<List<DownloaderConfig>> {
     _reload();
   }
 
+  /// 标记默认下载器（同一时刻只有一个）。
+  Future<void> setDefault(String downloaderId) async {
+    await _repo.setDefault(downloaderId);
+    _reload();
+  }
+
   Future<void> toggleEnabled(String downloaderId) async {
     final List<DownloaderConfig> list = _repo.loadAll();
     await _repo.saveAll(
@@ -122,10 +128,29 @@ final ProviderFamily<DownloaderConfig?, String> downloaderByIdProvider =
   return null;
 });
 
+/// 当前默认下载器（推送时未指定目标就走它）。
+final Provider<DownloaderConfig?> defaultDownloaderProvider = Provider<DownloaderConfig?>(
+  (Ref ref) {
+    final List<DownloaderConfig> list =
+        ref.watch(downloaderListProvider).valueOrNull ?? const <DownloaderConfig>[];
+    for (final DownloaderConfig config in list) {
+      if (config.isDefault) return config;
+    }
+    return list.isEmpty ? null : list.first;
+  },
+);
+
 /// 某个下载器的任务列表（数据来自 NAS 后端）。
 final FutureProviderFamily<List<DownloaderTask>, String> downloaderTasksProvider =
     FutureProvider.family<List<DownloaderTask>, String>(
   (Ref ref, String downloaderId) => ref.watch(downloaderApiProvider).fetchTasks(downloaderId),
+);
+
+/// 某个下载器的可选分类 / 标签 / 路径（供任务批量操作的选择器）。
+final FutureProviderFamily<DownloaderTaskOption, String> downloaderTaskOptionsProvider =
+    FutureProvider.family<DownloaderTaskOption, String>(
+  (Ref ref, String downloaderId) =>
+      ref.watch(downloaderApiProvider).fetchTaskOptions(downloaderId),
 );
 
 /// 下载器凭据（异步读取安全存储）。

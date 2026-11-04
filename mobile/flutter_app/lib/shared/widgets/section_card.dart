@@ -63,7 +63,11 @@ class SectionCard extends StatelessWidget {
         borderRadius: AppRadius.cardBorder,
         border: Border.all(color: theme.colorScheme.outline),
       ),
-      child: body,
+      // 卡片背景是不透明底色，若直接把 ListTile / SwitchListTile 放进来，
+      // 它们的背景与点击水波纹会画在更外层的 Material 上、被这层底色盖住，
+      // 调试模式下会直接抛断言（“ListTile background color or ink splashes may be invisible”）。
+      // 这里垫一层透明 Material，让卡片内的列表项把水波纹画在这层上。
+      child: Material(type: MaterialType.transparency, child: body),
     );
 
     if (onTap == null) return card;

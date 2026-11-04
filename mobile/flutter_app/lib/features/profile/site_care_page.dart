@@ -158,6 +158,40 @@ class SiteCarePage extends ConsumerWidget {
                                   ),
                                 ],
                               ),
+                              if (stats.classPlanLabel.isNotEmpty) ...<Widget>[
+                                const SizedBox(height: AppSpacing.xs),
+                                Text(stats.classPlanLabel, style: theme.textTheme.bodySmall),
+                              ],
+                              if ((stats.policy?.alternativesLabel ?? '').isNotEmpty) ...<Widget>[
+                                const SizedBox(height: AppSpacing.xxs),
+                                Text(stats.policy!.alternativesLabel, style: theme.textTheme.bodySmall),
+                              ],
+                              const SizedBox(height: AppSpacing.sm),
+                              Wrap(
+                                spacing: AppSpacing.xs,
+                                runSpacing: AppSpacing.xxs,
+                                children: <Widget>[
+                                  // 保种契约（H&R）达成情况：与保号进度是两套口径，分开呈现。
+                                  StatusBadge(
+                                    label: stats.contractMet == null
+                                        ? '契约 数据未提供'
+                                        : '契约 ${stats.contractLabel}',
+                                    tone: stats.contractMet == null
+                                        ? StatusTone.neutral
+                                        : (stats.contractMet! ? StatusTone.ok : StatusTone.danger),
+                                    compact: true,
+                                  ),
+                                  StatusBadge(
+                                    label: 'HR ${stats.hrLabel}',
+                                    tone: stats.hrCount > 0 ? StatusTone.warning : StatusTone.neutral,
+                                    compact: true,
+                                  ),
+                                ],
+                              ),
+                              if (stats.contractNote.isNotEmpty) ...<Widget>[
+                                const SizedBox(height: AppSpacing.xxs),
+                                Text(stats.contractNote, style: theme.textTheme.bodySmall),
+                              ],
                               const SizedBox(height: AppSpacing.sm),
                               FilledButton.tonalIcon(
                                 onPressed: () => context.go(AppRoutes.settingsSignInPath),

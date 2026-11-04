@@ -11,9 +11,15 @@ import '../../core/theme/design_tokens.dart';
 import '../../shared/widgets/section_card.dart';
 import '../../shared/widgets/state_views.dart';
 import '../../shared/widgets/status_badge.dart';
+import '../../shared/widgets/swipe_action_row.dart';
 import 'downloader_providers.dart';
 
 /// 下载器页：多下载器清单与状态入口（需求 3）。
+///
+/// 本轮改造要点：
+/// - 每张卡片支持**左滑**露出「编辑 / 删除 / 默认」三个动作，右上角三点菜单保留；
+/// - 「默认」是互斥标记：设为默认后其它下载器自动取消，推送时未指定目标就走默认下载器；
+/// - 连接是否正常在外层用状态圆点表达，进入详情后不再重复展示连接信息与操作框。
 class DownloadersPage extends ConsumerStatefulWidget {
   const DownloadersPage({super.key});
 
@@ -24,6 +30,9 @@ class DownloadersPage extends ConsumerStatefulWidget {
 class _DownloadersPageState extends ConsumerState<DownloadersPage> {
   String? _testingId;
 
+  /// 当前左滑展开的那一行；同一时刻只允许一行展开。
+  String? _openId;
+
   Future<void> _test(DownloaderConfig config) async {
     setState(() => _testingId = config.id);
     final SiteProbeResult result = await ref.read(downloaderProbeProvider)(config.baseUrl);
@@ -33,6 +42,33 @@ class _DownloadersPageState extends ConsumerState<DownloadersPage> {
     ScaffoldMessenger.of(context).showSnackBar(
       SnackBar(content: Text('${config.name}：${result.outcome.label} · ${result.message}')),
     );
+  }
+
+  Future<void> _setDefault(DownloaderConfig config) async {
+    if (config.isDefault) {
+      _snack('「${config.name}」已经是默认下载器');
+      return;
+    }
+    await ref.read(downloaderListProvider.notifier).setDefault(config.id);
+    if (!mounted) return;
+    _snack('已把「${config.name}」设为默认下载器');
+  }
+
+  void _snack(String message) {
+    ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(message)));
+  }
+
+  void _openDetail(DownloaderConfig config) {
+    // 有行处于展开状态时，先收起，避免“想收卡片却进了详情”。
+    if (_openId != null) {
+      setState(() => _openId = null);
+      return;
+    }
+    context.go(AppRoutes.downloaderDetailPath(config.id));
+  }
+
+  void _edit(DownloaderConfig config) {
+    context.go(AppRoutes.downloaderEditPath(config.id));
   }
 
   Future<void> _confirmDelete(DownloaderConfig config) async {
@@ -88,6 +124,13 @@ class _DownloadersPageState extends ConsumerState<DownloadersPage> {
                 message: '尚未配置 NAS 服务地址；下载器任务的获取与操作由 NAS 后端统一调度。',
               ),
             ),
+          Padding(
+            padding: const EdgeInsets.fromLTRB(AppSpacing.lg, AppSpacing.sm, AppSpacing.lg, 0),
+            child: Align(
+              alignment: Alignment.centerLeft,
+              child: Text('左滑卡片可「编辑 / 删除 / 默认」', style: theme.textTheme.bodySmall),
+            ),
+          ),
           Expanded(
             child: listAsync.when(
               loading: () => const LoadingStateView(message: '正在读取下载器清单'),
@@ -109,12 +152,41 @@ class _DownloadersPageState extends ConsumerState<DownloadersPage> {
                           const SizedBox(height: AppSpacing.cardGap),
                       itemBuilder: (BuildContext context, int index) {
                         final DownloaderConfig config = list[index];
-                        return _DownloaderTile(
-                          config: config,
-                          testing: _testingId == config.id,
-                          onTap: () => context.go(AppRoutes.downloaderDetailPath(config.id)),
-                          onTest: () => _test(config),
-                          onDelete: () => _confirmDelete(config),
+                        return SwipeActionRow(
+                          itemKey: config.id,
+                          openKey: _openId,
+                          onOpen: (String? key) => setState(() => _openId = key),
+                          actions: <SwipeActionButton>[
+                            SwipeActionButton(
+                              label: '编辑',
+                              icon: Icons.edit_outlined,
+                              onTap: () => _edit(config),
+                            ),
+                            SwipeActionButton(
+                              label: '删除',
+                              icon: Icons.delete_outline,
+                              background: theme.colorScheme.errorContainer,
+                              foreground: theme.colorScheme.onErrorContainer,
+                              onTap: () => _confirmDelete(config),
+                            ),
+                            SwipeActionButton(
+                              label: '默认',
+                              icon: config.isDefault
+                                  ? Icons.star
+                                  : Icons.star_border,
+                              enabled: !config.isDefault,
+                              onTap: () => _setDefault(config),
+                            ),
+                          ],
+                          child: _DownloaderTile(
+                            config: config,
+                            testing: _testingId == config.id,
+                            onTap: () => _openDetail(config),
+                            onTest: () => _test(config),
+                            onEdit: () => _edit(config),
+                            onSetDefault: () => _setDefault(config),
+                            onDelete: () => _confirmDelete(config),
+                          ),
                         );
                       },
                     ),
@@ -166,6 +238,8 @@ class _DownloaderTile extends StatelessWidget {
     required this.testing,
     required this.onTap,
     required this.onTest,
+    required this.onEdit,
+    required this.onSetDefault,
     required this.onDelete,
   });
 
@@ -173,6 +247,8 @@ class _DownloaderTile extends StatelessWidget {
   final bool testing;
   final VoidCallback onTap;
   final VoidCallback onTest;
+  final VoidCallback onEdit;
+  final VoidCallback onSetDefault;
   final VoidCallback onDelete;
 
   static StatusTone _tone(DownloaderHealth health) => switch (health) {
@@ -213,7 +289,15 @@ class _DownloaderTile extends StatelessWidget {
                   spacing: AppSpacing.xs,
                   runSpacing: AppSpacing.xxs,
                   children: <Widget>[
+                    // 连接是否正常：这个圆点就是外层唯一的连接状态表达。
                     StatusBadge(label: config.health.label, tone: _tone(config.health), compact: true),
+                    if (config.isDefault)
+                      const StatusBadge(
+                        label: '默认',
+                        tone: StatusTone.info,
+                        icon: Icons.star,
+                        compact: true,
+                      ),
                     StatusBadge(label: config.kind.label, tone: StatusTone.info, compact: true),
                     StatusBadge(
                       label: config.credentialConfigured ? '账号已录入' : '待录账号',
@@ -238,14 +322,24 @@ class _DownloaderTile extends StatelessWidget {
                 switch (action) {
                   case 'test':
                     onTest();
+                  case 'edit':
+                    onEdit();
+                  case 'default':
+                    onSetDefault();
                   case 'delete':
                     onDelete();
                 }
               },
-              itemBuilder: (BuildContext context) => const <PopupMenuEntry<String>>[
-                PopupMenuItem<String>(value: 'test', child: Text('测试连接')),
-                PopupMenuDivider(),
-                PopupMenuItem<String>(value: 'delete', child: Text('删除下载器')),
+              itemBuilder: (BuildContext context) => <PopupMenuEntry<String>>[
+                const PopupMenuItem<String>(value: 'test', child: Text('测试连接')),
+                const PopupMenuItem<String>(value: 'edit', child: Text('编辑配置')),
+                PopupMenuItem<String>(
+                  value: 'default',
+                  enabled: !config.isDefault,
+                  child: Text(config.isDefault ? '已是默认下载器' : '设为默认下载器'),
+                ),
+                const PopupMenuDivider(),
+                const PopupMenuItem<String>(value: 'delete', child: Text('删除下载器')),
               ],
             ),
         ],

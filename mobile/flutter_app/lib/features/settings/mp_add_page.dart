@@ -6,17 +6,24 @@ import 'package:uuid/uuid.dart';
 import '../../core/adapters/moviepilot_adapter_registry.dart';
 import '../../core/config/app_config.dart';
 import '../../core/models/moviepilot.dart';
-import '../../core/network/endpoint_resolver.dart' show ActiveLink;
+import '../../core/network/address_probe_controller.dart';
 import '../../core/network/url_utils.dart';
+import '../../core/providers.dart';
 import '../../core/router/app_routes.dart';
-import '../../core/services/site_reachability_probe.dart';
-import '../../core/theme/app_colors.dart';
+import '../../core/storage/probe_result_store.dart';
 import '../../core/theme/design_tokens.dart';
+import '../../shared/widgets/address_field.dart';
+import '../../shared/widgets/channel_switch.dart';
 import '../../shared/widgets/section_card.dart';
-import '../../shared/widgets/status_badge.dart';
 import '../search/search_providers.dart';
 
 /// 添加 / 编辑 MoviePilot 实例（需求 4、9：支持多个 MP 与搜索增强配置）。
+///
+/// 本轮改造要点（地址录入与实时连通）：
+/// - 内网 / 外网地址按「协议点选 + 主机 + 端口（可改）+ 可选子路径」分开录入；
+/// - 两条通道**分别探测**，各自带连通标记，整体情况汇总在「服务地址」框底部；
+/// - 探测结论落盘（`mp.<id>.lan` / `mp.<id>.wan`），重进页面按已存地址实测，
+///   不会一直是「未检测」；测试后自动保存本页内容。
 class MpAddPage extends ConsumerStatefulWidget {
   const MpAddPage({super.key, this.instanceId});
 
@@ -27,47 +34,163 @@ class MpAddPage extends ConsumerStatefulWidget {
 }
 
 class _MpAddPageState extends ConsumerState<MpAddPage> {
+  static const int _defaultLanPort = 3000;
+  static const int _defaultWanPort = 443;
+
   final GlobalKey<FormState> _formKey = GlobalKey<FormState>();
   final TextEditingController _name = TextEditingController();
-  final TextEditingController _lanUrl = TextEditingController();
-  final TextEditingController _wanUrl = TextEditingController();
+  final TextEditingController _lanHost = TextEditingController();
+  final TextEditingController _lanPort = TextEditingController();
+  final TextEditingController _lanPath = TextEditingController();
+  final TextEditingController _wanHost = TextEditingController();
+  final TextEditingController _wanPort = TextEditingController();
+  final TextEditingController _wanPath = TextEditingController();
   final TextEditingController _token = TextEditingController();
 
   MpVersion _version = MoviePilotAdapterRegistry.defaultVersion;
-  SiteProbeResult? _lanResult;
-  SiteProbeResult? _wanResult;
-  ActiveLink _activeLink = ActiveLink.none;
-  bool _probing = false;
+
+  /// 当前展示的通道：0 内网 / 1 外网（一次只显示一条，避免两栏并排）。
+  int _activeChannel = 0;
+  String _lanScheme = 'http';
+  String _wanScheme = 'https';
   bool _saving = false;
   bool _prefilled = false;
 
-  /// 本页对应的实例 id：首次保存时生成并复用，避免「测试一次就多建一条」。
+  /// 本页对应的实例 id：首次落盘时生成并复用，避免「测试一次就多建一条」。
   String? _pendingId;
 
+  late final AddressProbeController _lanProbes;
+  late final AddressProbeController _wanProbes;
+  late final String _lanKey;
+  late final String _wanKey;
+
   bool get _isEditing => widget.instanceId != null;
+
+  @override
+  void initState() {
+    super.initState();
+    if (!_isEditing) _pendingId = const Uuid().v4();
+    final String id = widget.instanceId ?? _pendingId!;
+    _lanKey = 'mp.$id.lan';
+    _wanKey = 'mp.$id.wan';
+
+    final ProbeResultStore store = ref.read(probeResultStoreProvider);
+    _lanProbes = AddressProbeController(
+      store: store,
+      probe: _probe,
+      timeout: AppConfig.lanProbeTimeout,
+    )..addListener(_onProbeChanged);
+    _wanProbes = AddressProbeController(
+      store: store,
+      probe: _probe,
+      timeout: AppConfig.wanProbeTimeout,
+    )..addListener(_onProbeChanged);
+  }
 
   @override
   void didChangeDependencies() {
     super.didChangeDependencies();
     if (_prefilled) return;
     _prefilled = true;
-    if (!_isEditing) return;
-    final MpInstance? instance = ref.read(mpByIdProvider(widget.instanceId!));
-    if (instance == null) return;
-    _name.text = instance.name;
-    // 旧数据（单一地址）已在模型里按内网/公网归到对应通道，这里直接回填两条通道。
-    _lanUrl.text = instance.lanBaseUrl;
-    _wanUrl.text = instance.wanBaseUrl;
-    _version = instance.version;
+    if (_isEditing) {
+      final MpInstance? instance = ref.read(mpByIdProvider(widget.instanceId!));
+      if (instance != null) {
+        _name.text = instance.name;
+        // 旧数据（单一地址）已在模型里按内网/公网归到对应通道，这里直接回填两条通道。
+        _fillChannel(instance.lanBaseUrl, isLan: true);
+        _fillChannel(instance.wanBaseUrl, isLan: false);
+        _version = instance.version;
+      }
+    }
+    if (_lanPort.text.trim().isEmpty) _lanPort.text = '$_defaultLanPort';
+    if (_wanPort.text.trim().isEmpty) _wanPort.text = '$_defaultWanPort';
+
+    // 进页面就按已存地址实测两条通道：状态实时，而不是固定「未检测」。
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      _reprobeAll();
+    });
   }
 
   @override
   void dispose() {
     _name.dispose();
-    _lanUrl.dispose();
-    _wanUrl.dispose();
+    _lanHost.dispose();
+    _lanPort.dispose();
+    _lanPath.dispose();
+    _wanHost.dispose();
+    _wanPort.dispose();
+    _wanPath.dispose();
     _token.dispose();
+    _lanProbes.dispose();
+    _wanProbes.dispose();
     super.dispose();
+  }
+
+  // ---------- 地址 ----------
+
+  bool get _lanConfigured => _lanHost.text.trim().isNotEmpty;
+  bool get _wanConfigured => _wanHost.text.trim().isNotEmpty;
+
+  Uri? get _lanUri => UrlUtils.compose(
+        scheme: _lanScheme,
+        host: _lanHost.text,
+        port: _lanPort.text,
+        path: _lanPath.text.trim(),
+      );
+
+  Uri? get _wanUri => UrlUtils.compose(
+        scheme: _wanScheme,
+        host: _wanHost.text,
+        port: _wanPort.text,
+        path: _wanPath.text.trim(),
+      );
+
+  void _fillChannel(String baseUrl, {required bool isLan}) {
+    final AddressParts parts = UrlUtils.split(baseUrl);
+    if (isLan) {
+      if (parts.isEmpty) {
+        _lanHost.text = baseUrl;
+        return;
+      }
+      _lanScheme = parts.scheme;
+      _lanHost.text = parts.host;
+      _lanPort.text = parts.portText;
+      _lanPath.text = parts.path;
+    } else {
+      if (parts.isEmpty) {
+        _wanHost.text = baseUrl;
+        return;
+      }
+      _wanScheme = parts.scheme;
+      _wanHost.text = parts.host;
+      _wanPort.text = parts.portText;
+      _wanPath.text = parts.path;
+    }
+  }
+
+  void _onSchemeChanged({required bool isLan, required String value}) {
+    setState(() {
+      if (isLan) {
+        _lanPort.text = UrlUtils.adjustPortForScheme(scheme: value, currentPort: _lanPort.text);
+        _lanScheme = value;
+      } else {
+        _wanPort.text = UrlUtils.adjustPortForScheme(scheme: value, currentPort: _wanPort.text);
+        _wanScheme = value;
+      }
+    });
+    _scheduleProbe(isLan: isLan);
+  }
+
+  Future<ProbeSnapshot> _probe(Uri target, Duration timeout) async =>
+      snapshotFromSiteProbe(
+        // MP 没有 /api/v1/health，可用性以「能否拿到站点响应」为准（401/403 也算连通）。
+        await ref.read(mpProbeProvider)(target.toString(), timeout: timeout),
+        target,
+      );
+
+  void _onProbeChanged() {
+    if (mounted) setState(() {});
   }
 
   void _snack(String message) {
@@ -82,47 +205,47 @@ class _MpAddPageState extends ConsumerState<MpAddPage> {
     }
   }
 
+  void _scheduleProbe({required bool isLan}) {
+    if (isLan) {
+      _lanProbes.schedule(_lanKey, _lanConfigured ? _lanUri : null);
+    } else {
+      _wanProbes.schedule(_wanKey, _wanConfigured ? _wanUri : null);
+    }
+  }
+
+  Future<void> _reprobeAll() async {
+    await Future.wait<void>(<Future<void>>[
+      if (_lanConfigured) _lanProbes.probeNow(_lanKey, _lanUri),
+      if (_wanConfigured) _wanProbes.probeNow(_wanKey, _wanUri),
+    ]);
+  }
+
+  /// 当前实际优先使用的通道（供底部整体情况展示）。
+  String _activeLabel() {
+    if (_lanProbes.snapshot(_lanKey)?.usable ?? false) return '内网';
+    if (_wanProbes.snapshot(_wanKey)?.usable ?? false) return '外网';
+    return '';
+  }
+
   /// 测试两条通道：内网优先判定「当前会走哪条」，两条都测以便排障。
   Future<void> _testConnection() async {
-    final Uri? lan = UrlUtils.normalize(_lanUrl.text);
-    final Uri? wan = UrlUtils.normalize(_wanUrl.text);
-    if (_lanUrl.text.trim().isNotEmpty && lan == null) {
-      _snack('内网地址格式不正确，请检查是否写成了完整地址');
+    if (_lanConfigured && _lanUri == null) {
+      _snack('内网主机或端口不正确，请检查');
       return;
     }
-    if (_wanUrl.text.trim().isNotEmpty && wan == null) {
-      _snack('外网地址格式不正确，请检查是否写成了完整地址');
+    if (_wanConfigured && _wanUri == null) {
+      _snack('外网主机或端口不正确，请检查');
       return;
     }
-    if (lan == null && wan == null) {
+    if (!_lanConfigured && !_wanConfigured) {
       _snack('请至少填写内网或外网地址');
       return;
     }
 
-    setState(() {
-      _probing = true;
-      _lanResult = null;
-      _wanResult = null;
-      _activeLink = ActiveLink.none;
-    });
-
-    final MpReachabilityProbe probe = ref.read(mpProbeProvider);
-    final SiteProbeResult? lanResult =
-        lan == null ? null : await probe(lan.toString(), timeout: AppConfig.lanProbeTimeout);
-    final SiteProbeResult? wanResult =
-        wan == null ? null : await probe(wan.toString(), timeout: AppConfig.wanProbeTimeout);
-
-    if (!mounted) return;
-    final bool lanOk = lanResult?.isSuccess ?? false;
-    final bool wanOk = wanResult?.isSuccess ?? false;
-    setState(() {
-      _probing = false;
-      _lanResult = lanResult;
-      _wanResult = wanResult;
-      _activeLink = lanOk
-          ? ActiveLink.lan
-          : (wanOk ? ActiveLink.wan : ActiveLink.none);
-    });
+    setState(() {});
+    await _reprobeAll();
+    final bool lanOk = _lanProbes.snapshot(_lanKey)?.usable ?? false;
+    final bool wanOk = _wanProbes.snapshot(_wanKey)?.usable ?? false;
 
     // 需求：测试后自动保存，无论测试成功或失败；并用测试结果刷新实例健康状态。
     final MpInstance saved = await _persist();
@@ -133,8 +256,8 @@ class _MpAddPageState extends ConsumerState<MpAddPage> {
 
   /// 落盘当前表单内容（新增或更新同一条），供「测试后自动保存」与「保存实例」共用。
   Future<MpInstance> _persist() async {
-    final Uri? lan = UrlUtils.normalize(_lanUrl.text);
-    final Uri? wan = UrlUtils.normalize(_wanUrl.text);
+    final Uri? lan = _lanUri;
+    final Uri? wan = _wanUri;
     final String id = widget.instanceId ?? (_pendingId ??= const Uuid().v4());
     final String token = _token.text.trim();
 
@@ -151,8 +274,8 @@ class _MpAddPageState extends ConsumerState<MpAddPage> {
     final MpInstance instance = existing.copyWith(
       id: id,
       name: _name.text.trim(),
-      lanBaseUrl: lan?.toString() ?? '',
-      wanBaseUrl: wan?.toString() ?? '',
+      lanBaseUrl: _lanConfigured ? (lan?.toString() ?? '') : '',
+      wanBaseUrl: _wanConfigured ? (wan?.toString() ?? '') : '',
       // 兼容字段：留「内网优先」的地址，供仍按单一地址展示 / 下发的地方使用。
       baseUrl: (lan ?? wan)?.toString() ?? '',
       version: _version,
@@ -180,40 +303,6 @@ class _MpAddPageState extends ConsumerState<MpAddPage> {
     _leave();
   }
 
-  Widget _channelRow(ThemeData theme, String label, bool empty, SiteProbeResult? result) {
-    final StatusBadge badge;
-    if (_probing) {
-      badge = const StatusBadge(label: '检测中', tone: StatusTone.neutral, compact: true);
-    } else if (empty) {
-      badge = const StatusBadge(label: '未配置', tone: StatusTone.neutral, compact: true);
-    } else if (result == null) {
-      badge = const StatusBadge(label: '未检测', tone: StatusTone.neutral, compact: true);
-    } else {
-      badge = StatusBadge(
-        label: result.outcome.label,
-        tone: result.isSuccess ? StatusTone.ok : StatusTone.danger,
-        icon: result.isSuccess ? Icons.check_circle_outline : Icons.error_outline,
-        compact: true,
-      );
-    }
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: <Widget>[
-        Row(
-          children: <Widget>[
-            SizedBox(width: 56, child: Text(label, style: theme.textTheme.bodyMedium)),
-            badge,
-          ],
-        ),
-        if (!_probing && result != null && result.message.isNotEmpty)
-          Padding(
-            padding: const EdgeInsets.only(left: 56, top: AppSpacing.xxs),
-            child: Text(result.message, style: theme.textTheme.bodySmall),
-          ),
-      ],
-    );
-  }
-
   @override
   Widget build(BuildContext context) {
     final ThemeData theme = Theme.of(context);
@@ -223,6 +312,9 @@ class _MpAddPageState extends ConsumerState<MpAddPage> {
         : ref.watch(mpCredentialProvider(instanceId));
     final bool hasToken = credentialAsync.valueOrNull != null;
     final MpAdapterDescriptor descriptor = MoviePilotAdapterRegistry.of(_version);
+    final ProbeSnapshot? lanSnapshot = _lanProbes.snapshot(_lanKey);
+    final ProbeSnapshot? wanSnapshot = _wanProbes.snapshot(_wanKey);
+    final bool probing = _lanProbes.isProbing(_lanKey) || _wanProbes.isProbing(_wanKey);
 
     return Scaffold(
       appBar: AppBar(
@@ -235,9 +327,10 @@ class _MpAddPageState extends ConsumerState<MpAddPage> {
           padding: const EdgeInsets.fromLTRB(AppSpacing.lg, AppSpacing.sm, AppSpacing.lg, AppSpacing.xxl),
           children: <Widget>[
             SectionCard(
-              title: '实例信息',
-              subtitle: '可添加多个 MP 实例；协议调用由 NAS 后端适配器完成',
+              title: '服务地址',
+              subtitle: '协议点选、主机与端口分开填；左侧切换内网 / 外网，两条通道分别检测，整体情况在最下方',
               child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
                 children: <Widget>[
                   TextFormField(
                     controller: _name,
@@ -246,49 +339,83 @@ class _MpAddPageState extends ConsumerState<MpAddPage> {
                         (value == null || value.trim().isEmpty) ? '请填写名称' : null,
                   ),
                   const SizedBox(height: AppSpacing.md),
-                  TextFormField(
-                    controller: _lanUrl,
-                    keyboardType: TextInputType.url,
-                    decoration: const InputDecoration(
-                      labelText: '内网地址',
-                      hintText: 'http://192.168.1.10:3000',
-                    ),
-                    validator: (String? value) {
-                      final String lanText = value?.trim() ?? '';
-                      final String wanText = _wanUrl.text.trim();
-                      if (lanText.isEmpty && wanText.isEmpty) return '内网与外网至少填一个';
-                      if (lanText.isNotEmpty && UrlUtils.normalize(lanText) == null) {
-                        return '地址格式不正确';
-                      }
-                      return null;
-                    },
-                  ),
-                  const SizedBox(height: AppSpacing.md),
-                  TextFormField(
-                    controller: _wanUrl,
-                    keyboardType: TextInputType.url,
-                    decoration: const InputDecoration(
-                      labelText: '外网地址',
-                      hintText: 'https://mp.example.com:5888',
-                    ),
-                    validator: (String? value) {
-                      final String wanText = value?.trim() ?? '';
-                      final String lanText = _lanUrl.text.trim();
-                      if (lanText.isEmpty && wanText.isEmpty) return '内网与外网至少填一个';
-                      if (wanText.isNotEmpty && UrlUtils.normalize(wanText) == null) {
-                        return '地址格式不正确';
-                      }
-                      return null;
-                    },
+                  ChannelSwitch(
+                    index: _activeChannel,
+                    onIndexChanged: (int value) => setState(() => _activeChannel = value),
+                    panes: <ChannelPane>[
+                      ChannelPane(
+                        label: '内网',
+                        configured: _lanConfigured,
+                        snapshot: lanSnapshot,
+                        probing: _lanProbes.isProbing(_lanKey),
+                        child: AddressInput(
+                          label: '内网地址',
+                          keyPrefix: 'mp.lan',
+                          scheme: _lanScheme,
+                          hostController: _lanHost,
+                          portController: _lanPort,
+                          pathController: _lanPath,
+                          onSchemeChanged: (String value) =>
+                              _onSchemeChanged(isLan: true, value: value),
+                          snapshot: lanSnapshot,
+                          probing: _lanProbes.isProbing(_lanKey),
+                          hostHint: '192.168.1.10',
+                          onEdited: () => _scheduleProbe(isLan: true),
+                          onSubmitted: () => _lanProbes.probeNow(_lanKey, _lanUri),
+                        ),
+                      ),
+                      ChannelPane(
+                        label: '外网',
+                        configured: _wanConfigured,
+                        snapshot: wanSnapshot,
+                        probing: _wanProbes.isProbing(_wanKey),
+                        child: AddressInput(
+                          label: '外网地址',
+                          keyPrefix: 'mp.wan',
+                          scheme: _wanScheme,
+                          hostController: _wanHost,
+                          portController: _wanPort,
+                          pathController: _wanPath,
+                          onSchemeChanged: (String value) =>
+                              _onSchemeChanged(isLan: false, value: value),
+                          snapshot: wanSnapshot,
+                          probing: _wanProbes.isProbing(_wanKey),
+                          hostHint: 'mp.example.com',
+                          onEdited: () => _scheduleProbe(isLan: false),
+                          onSubmitted: () => _wanProbes.probeNow(_wanKey, _wanUri),
+                        ),
+                      ),
+                    ],
                   ),
                   const SizedBox(height: AppSpacing.xs),
-                  Align(
-                    alignment: Alignment.centerLeft,
-                    child: Text(
-                      '自动模式：内网优先（${AppConfig.lanProbeTimeout.inSeconds} 秒），'
-                      '失败回退外网（${AppConfig.wanProbeTimeout.inSeconds} 秒），回到家庭网络自动切回。',
-                      style: theme.textTheme.bodySmall,
-                    ),
+                  Text(
+                    '自动模式：内网优先（${AppConfig.lanProbeTimeout.inSeconds} 秒），'
+                    '失败回退外网（${AppConfig.wanProbeTimeout.inSeconds} 秒），回到家庭网络自动切回。',
+                    style: theme.textTheme.bodySmall,
+                  ),
+                  const Divider(height: AppSpacing.xl),
+                  AddressPairSummary(
+                    items: <AddressSummaryItem>[
+                      AddressSummaryItem(
+                        name: '内网',
+                        configured: _lanConfigured,
+                        snapshot: lanSnapshot,
+                        probing: _lanProbes.isProbing(_lanKey),
+                      ),
+                      AddressSummaryItem(
+                        name: '外网',
+                        configured: _wanConfigured,
+                        snapshot: wanSnapshot,
+                        probing: _wanProbes.isProbing(_wanKey),
+                      ),
+                    ],
+                    activeLabel: _activeLabel(),
+                  ),
+                  const SizedBox(height: AppSpacing.md),
+                  FilledButton.tonalIcon(
+                    onPressed: probing ? null : _testConnection,
+                    icon: const Icon(Icons.network_check, size: AppSizes.iconSm),
+                    label: Text(probing ? '测试中…' : '测试两条通道'),
                   ),
                   const SizedBox(height: AppSpacing.md),
                   DropdownButtonFormField<MpVersion>(
@@ -306,10 +433,7 @@ class _MpAddPageState extends ConsumerState<MpAddPage> {
                     },
                   ),
                   const SizedBox(height: AppSpacing.xs),
-                  Align(
-                    alignment: Alignment.centerLeft,
-                    child: Text(descriptor.note, style: theme.textTheme.bodySmall),
-                  ),
+                  Text(descriptor.note, style: theme.textTheme.bodySmall),
                 ],
               ),
             ),
@@ -324,29 +448,6 @@ class _MpAddPageState extends ConsumerState<MpAddPage> {
                   labelText: 'API 令牌',
                   hintText: hasToken ? '已保存，留空表示不修改' : '未保存',
                 ),
-              ),
-            ),
-            const SizedBox(height: AppSpacing.lg),
-            SectionCard(
-              title: '连接测试',
-              subtitle: '只探测地址可达性，不校验令牌；两条通道分别给出结果，测试后自动保存本页内容',
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: <Widget>[
-                  FilledButton.tonalIcon(
-                    onPressed: _probing ? null : _testConnection,
-                    icon: const Icon(Icons.network_check, size: AppSizes.iconSm),
-                    label: Text(_probing ? '测试中…' : '测试两条通道'),
-                  ),
-                  const SizedBox(height: AppSpacing.sm),
-                  _channelRow(theme, '内网', _lanUrl.text.trim().isEmpty, _lanResult),
-                  const SizedBox(height: AppSpacing.sm),
-                  _channelRow(theme, '外网', _wanUrl.text.trim().isEmpty, _wanResult),
-                  if (!_probing && _activeLink != ActiveLink.none) ...<Widget>[
-                    const SizedBox(height: AppSpacing.sm),
-                    Text('当前会走：${_activeLink.label}通道', style: theme.textTheme.bodyMedium),
-                  ],
-                ],
               ),
             ),
             const SizedBox(height: AppSpacing.xl),

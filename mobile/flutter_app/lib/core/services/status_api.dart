@@ -29,6 +29,33 @@ class ProfileApi {
   }
 }
 
+/// 站点数据面板接口（需求 4：站点页的刷新与四态呈现）。
+///
+/// 契约：
+/// - 站点统计字段复用 `GET /api/v1/profile?siteIds=...`（与个人数据同一份口径，
+///   避免同一批数据两套字段）；
+/// - `POST /api/v1/sites/{siteId}/refresh` → 单站刷新；
+/// - `POST /api/v1/sites/refresh` body `{siteIds?}` → 批量刷新（为空表示全部启用站点）。
+///
+/// 抓取站点页面由 NAS 后端适配器完成；移动端只触发并消费结果。
+class SiteStatsApi {
+  SiteStatsApi({required this.client});
+
+  final ApiClient client;
+
+  static const String refreshAllPath = '/api/v1/sites/refresh';
+
+  Future<void> refreshSite(String siteId) =>
+      client.post<void>('/api/v1/sites/$siteId/refresh');
+
+  Future<void> refreshAll({List<String> siteIds = const <String>[]}) => client.post<void>(
+        refreshAllPath,
+        data: <String, dynamic>{
+          if (siteIds.isNotEmpty) 'siteIds': siteIds,
+        },
+      );
+}
+
 /// PT 监护室接口（需求 6：各 PT 站点是否病危、站庆等）。
 ///
 /// 契约：`GET /api/v1/monitor/events?limit=N` → `{ items: [...] }` 或数组。
@@ -73,19 +100,27 @@ class SignInApi {
   static const String runPath = '/api/v1/signin/run';
   static const String recordsPath = '/api/v1/signin/records';
 
-  Future<SignInRunResult> runAll({List<String> siteIds = const <String>[]}) async {
+  /// 批量签到。[mode] 区分「签到 + 模拟登录 / 仅签到 / 仅模拟登录」，
+  /// 与参考实现的「签到站点 + 仅模拟登录站点」两类口径一致。
+  Future<SignInRunResult> runAll({
+    List<String> siteIds = const <String>[],
+    SignInMode mode = SignInMode.both,
+  }) async {
     final Response<dynamic> response = await client.post<dynamic>(
       runPath,
       data: <String, dynamic>{
         if (siteIds.isNotEmpty) 'siteIds': siteIds,
+        'mode': mode.apiValue,
       },
     );
     return _parseResult(response.data);
   }
 
-  Future<SignInRunResult> runSite(String siteId) async {
-    final Response<dynamic> response =
-        await client.post<dynamic>('/api/v1/sites/$siteId/signin');
+  Future<SignInRunResult> runSite(String siteId, {SignInMode mode = SignInMode.both}) async {
+    final Response<dynamic> response = await client.post<dynamic>(
+      '/api/v1/sites/$siteId/signin',
+      data: <String, dynamic>{'mode': mode.apiValue},
+    );
     return _parseResult(response.data);
   }
 

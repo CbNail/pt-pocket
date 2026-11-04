@@ -128,7 +128,6 @@ class _SearchPageState extends ConsumerState<SearchPage> {
       );
     }
     if (!state.hasKeyword) return _historyView(state.history);
-    if (state.loading) return const LoadingStateView(message: '正在并发检索各站点');
     if (state.error != null) {
       return ErrorStateView(
         title: '搜索失败',
@@ -136,6 +135,9 @@ class _SearchPageState extends ConsumerState<SearchPage> {
         onRetry: () => ref.read(searchControllerProvider.notifier).retry(),
       );
     }
+    if (state.loading) return const LoadingStateView(message: '正在并发检索各站点');
+    if (state.streaming) return _streamView(state);
+
     final SearchPageResult? result = state.result;
     if (result == null || result.items.isEmpty) {
       return EmptyStateView(
@@ -145,6 +147,86 @@ class _SearchPageState extends ConsumerState<SearchPage> {
       );
     }
     return _resultsView(result);
+  }
+
+  /// 逐站（实时）模式：进度条常驻顶部，结果列表边搜边出。
+  Widget _streamView(SearchState state) {
+    final SearchPageResult? result = state.result;
+    return Column(
+      children: <Widget>[
+        _SearchProgressBar(
+          state: state,
+          onStop: () => ref.read(searchControllerProvider.notifier).stop(),
+          onRestart: () => ref.read(searchControllerProvider.notifier).retry(),
+          onStatus: () => _showSearchStatus(state),
+        ),
+        Expanded(
+          child: result == null || result.items.isEmpty
+              ? LoadingStateView(
+                  message: state.running
+                      ? '正在检索各站点，结果会逐站出现'
+                      : '本次搜索没有返回结果',
+                )
+              : _resultsView(result, streaming: true, running: state.running),
+        ),
+      ],
+    );
+  }
+
+  Future<void> _showSearchStatus(SearchState state) async {
+    final List<SiteSearchStatus> statuses = state.progress.values.toList(growable: false)
+      ..sort((SiteSearchStatus a, SiteSearchStatus b) {
+        if (a.phase == b.phase) return a.siteName.compareTo(b.siteName);
+        return a.phase.index.compareTo(b.phase.index);
+      });
+    await showDialog<void>(
+      context: context,
+      builder: (BuildContext dialogContext) => AlertDialog(
+        title: const Text('搜索状态'),
+        content: SizedBox(
+          width: 420,
+          child: ListView.separated(
+            shrinkWrap: true,
+            itemCount: statuses.length,
+            separatorBuilder: (BuildContext context, int index) => const Divider(height: 1),
+            itemBuilder: (BuildContext context, int index) {
+              final SiteSearchStatus status = statuses[index];
+              return ListTile(
+                dense: true,
+                contentPadding: EdgeInsets.zero,
+                title: Text(status.siteName.isEmpty ? status.siteId : status.siteName),
+                subtitle: status.message.isEmpty ? null : Text(status.message),
+                trailing: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: <Widget>[
+                    if (status.phase == SiteSearchPhase.success)
+                      Text('${status.itemCount} 条', style: Theme.of(context).textTheme.bodySmall),
+                    const SizedBox(width: AppSpacing.xs),
+                    StatusBadge(
+                      label: status.phase.label,
+                      tone: switch (status.phase) {
+                        SiteSearchPhase.success => StatusTone.ok,
+                        SiteSearchPhase.failed => StatusTone.danger,
+                        SiteSearchPhase.working => StatusTone.info,
+                        SiteSearchPhase.queued => StatusTone.neutral,
+                        SiteSearchPhase.cancelled => StatusTone.warning,
+                      },
+                      compact: true,
+                    ),
+                  ],
+                ),
+              );
+            },
+          ),
+        ),
+        actions: <Widget>[
+          TextButton(
+            onPressed: () => Navigator.of(dialogContext).pop(),
+            child: const Text('关闭'),
+          ),
+        ],
+      ),
+    );
   }
 
   Widget _historyView(List<String> history) {
@@ -238,7 +320,7 @@ class _SearchPageState extends ConsumerState<SearchPage> {
     );
   }
 
-  Widget _resultsView(SearchPageResult result) {
+  Widget _resultsView(SearchPageResult result, {bool streaming = false, bool running = false}) {
     final ThemeData theme = Theme.of(context);
     return ListView(
       padding: const EdgeInsets.fromLTRB(AppSpacing.lg, AppSpacing.sm, AppSpacing.lg, AppSpacing.xxl),
@@ -288,7 +370,7 @@ class _SearchPageState extends ConsumerState<SearchPage> {
               ),
             ),
           ),
-        if (result.hasMore)
+        if (result.hasMore && !running)
           Center(
             child: Padding(
               padding: const EdgeInsets.symmetric(vertical: AppSpacing.md),
@@ -303,7 +385,14 @@ class _SearchPageState extends ConsumerState<SearchPage> {
           Center(
             child: Padding(
               padding: const EdgeInsets.symmetric(vertical: AppSpacing.sm),
-              child: Text('已显示 ${result.items.length} 条结果', style: theme.textTheme.bodySmall),
+              child: Text(
+                streaming
+                    ? (running
+                        ? '已收到 ${result.items.length} 条，仍在检索其余站点'
+                        : '共 ${result.items.length} 条结果')
+                    : '已显示 ${result.items.length} 条结果',
+                style: theme.textTheme.bodySmall,
+              ),
             ),
           ),
       ],
@@ -362,6 +451,97 @@ class _SearchPageState extends ConsumerState<SearchPage> {
             ),
           ],
         ),
+      ),
+    );
+  }
+}
+
+/// 逐站检索的进度条：进行中显示「已完成 x/y 站 · 已收到 N 条」与「停止」，
+/// 停止后保留已收到结果并给出「继续搜索」，同时提供「搜索状态」查看每站结论。
+class _SearchProgressBar extends StatelessWidget {
+  const _SearchProgressBar({
+    required this.state,
+    required this.onStop,
+    required this.onRestart,
+    required this.onStatus,
+  });
+
+  final SearchState state;
+  final VoidCallback onStop;
+  final VoidCallback onRestart;
+  final VoidCallback onStatus;
+
+  @override
+  Widget build(BuildContext context) {
+    final ThemeData theme = Theme.of(context);
+    final int done = state.doneSites;
+    final int total = state.totalSites;
+    final String headline = state.running
+        ? '搜索中：已完成 $done/$total 站 · 已收到 ${state.receivedCount} 条'
+        : (state.stopped
+            ? '已停止：已收到 ${state.receivedCount} 条'
+            : '搜索完成：$total 站 · 共 ${state.receivedCount} 条');
+
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.fromLTRB(AppSpacing.lg, AppSpacing.sm, AppSpacing.lg, AppSpacing.sm),
+      decoration: BoxDecoration(
+        color: theme.colorScheme.surfaceContainerHigh,
+        border: Border(bottom: BorderSide(color: theme.colorScheme.outline)),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: <Widget>[
+          Row(
+            children: <Widget>[
+              if (state.running)
+                const Padding(
+                  padding: EdgeInsets.only(right: AppSpacing.sm),
+                  child: SizedBox(
+                    width: 14,
+                    height: 14,
+                    child: CircularProgressIndicator(strokeWidth: 2),
+                  ),
+                ),
+              Expanded(
+                child: Text(
+                  headline,
+                  style: theme.textTheme.bodySmall,
+                  overflow: TextOverflow.ellipsis,
+                ),
+              ),
+              TextButton(
+                onPressed: onStatus,
+                child: const Text('搜索状态'),
+              ),
+              if (state.running)
+                TextButton(
+                  onPressed: onStop,
+                  child: const Text('停止'),
+                )
+              else
+                TextButton(
+                  onPressed: onRestart,
+                  child: const Text('重新搜索'),
+                ),
+            ],
+          ),
+          if (state.running)
+            Padding(
+              padding: const EdgeInsets.only(bottom: AppSpacing.xs),
+              child: LinearProgressIndicator(
+                value: total == 0 ? null : done / total,
+                minHeight: 4,
+              ),
+            ),
+          if ((state.notice ?? '').isNotEmpty)
+            Text(
+              state.notice!,
+              style: theme.textTheme.bodySmall?.copyWith(
+                color: state.failedSites.isEmpty ? null : theme.colorScheme.error,
+              ),
+            ),
+        ],
       ),
     );
   }

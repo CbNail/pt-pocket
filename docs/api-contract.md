@@ -86,6 +86,10 @@
 | `POST /api/v1/downloaders/{id}/tasks/pause` | body `{hashes: [...]}` |
 | `POST /api/v1/downloaders/{id}/tasks/resume` | body `{hashes: [...]}` |
 | `POST /api/v1/downloaders/{id}/tasks/remove` | body `{hashes: [...], deleteFiles: bool}` |
+| `GET /api/v1/downloaders/{id}/task-options` | 可选分类 / 标签 / 路径，供批量操作的选择器使用 |
+| `POST /api/v1/downloaders/{id}/tasks/category` | body `{hashes: [...], category: ""}`，空串表示清除分类 |
+| `POST /api/v1/downloaders/{id}/tasks/tags` | body `{hashes: [...], tags: [...], mode: "add\|remove\|set"}` |
+| `POST /api/v1/downloaders/{id}/tasks/location` | body `{hashes: [...], savePath: "/downloads/PT"}` |
 
 任务字段（后端应归一化，字段别名移动端也做了兼容）：
 
@@ -96,18 +100,28 @@
   "sizeBytes": 0, "completedBytes": 0,
   "state": "downloading|seeding|paused|queued|checking|completed|error|unknown",
   "downloadSpeed": 0, "uploadSpeed": 0, "etaSeconds": -1,
-  "savePath": "", "category": "", "ratio": 0.0
+  "savePath": "", "category": "", "ratio": 0.0,
+  "tags": ["官种"], "tracker": "tracker.example.com",
+  "addedAt": "2026-11-01T00:00:00Z"
 }
 ```
 
+- `tags` 支持数组或逗号串；Transmission 没有独立分类，其 `labels` 同时充当分类与标签；
+- `tracker`（站点 / 服务器域名）是任务页「服务器筛选」的数据源，缺省显示「未标注」；
+- `addedAt` 兼容 ISO 字符串与 epoch（秒或毫秒），缺省则该任务在「加入时间」排序里落到末尾；
+- `task-options` 未实现时，移动端按空候选处理，批量操作仍可手填分类 / 标签 / 路径。
+
 > 返回非数组时移动端会抛出结构异常，而不是静默当作"没有任务"。
 
-## 5. 个人数据与统计
+## 5. 个人数据与统计（站点数据面板共用）
 
 | 项 | 值 |
 | --- | --- |
 | 方法 / 路径 | `GET /api/v1/profile?siteIds=s1,s2`（`siteIds` 可选，逗号分隔） |
-| 用途 | 我的数据（历程、统计）与养老进度 |
+| 用途 | 我的数据（历程、统计）、养老进度，以及站点页的数据面板 |
+
+站点页与「我的数据」共用这一份口径，站点的四态刷新状态也在同一响应里给出——
+同一批数据两套字段会让两边的数字对不上。
 
 响应体：
 
@@ -116,9 +130,11 @@
   "sites": [
     {
       "siteId": "s1", "siteName": "站点一",
-      "username": "", "userClass": "",
+      "iconUrl": "", "username": "", "userClass": "",
       "uploadedBytes": 0, "downloadedBytes": 0,
-      "bonus": 0, "seedingCount": 0, "leechingCount": 0,
+      "bonus": 0, "hourlyBonus": 0,
+      "seedingCount": 0, "leechingCount": 0,
+      "connections": 0, "hrCount": 0, "unreadMessages": 0, "invites": 0,
       "joinDate": "2020-01-01T00:00:00Z",
       "ratio": 1.25,
       "signedInToday": true, "consecutiveSignInDays": 12,
@@ -127,13 +143,49 @@
       "policy": {
         "minimumRatio": 0.6, "minimumSeedingDays": 30,
         "minimumUploadBytes": 0, "requiresSignIn": true, "note": ""
-      }
+      },
+      "refreshState": "refreshed|stale|failed|notLoggedIn",
+      "refreshMessage": "失败原因（仅失败 / 未登录时给）",
+      "refreshedAt": "2026-11-04T08:00:00Z",
+      "todayUploadedBytes": 0, "todayDownloadedBytes": 0,
+      "todayBaselineAvailable": false,
+      "nextClass": "", "nextClassRequirement": "",
+      "contractMet": true, "contractNote": ""
     }
   ],
+  "todayUploadedBytes": 0, "todayDownloadedBytes": 0, "todayBaselineAvailable": false,
   "generatedAt": "2026-11-03T10:00:00Z",
   "notice": ""
 }
 ```
+
+字段说明：
+
+- `hourlyBonus`（综合时魔）、`connections`（连接数）、`hrCount`（H&R 未完成数）、
+  `unreadMessages`（站内信未读数）、`invites`（可邀请名额）为站点页面板字段，
+  后端未采集时**整个键缺省**，移动端显示「—」/「无」，不用 0 冒充真实数据；
+- `iconUrl` 为空时移动端用站点名首字生成图标；
+- `refreshState` 是站点页四态筛选的唯一口径：`refreshed` 已刷新 / `stale` 未刷新（含从未刷新、
+  超过阈值）/ `failed` 失败 / `notLoggedIn` 未登录；其它取值按「未检测」处理（只出现在「全部」里）；
+- **今日增量**：`todayUploadedBytes` / `todayDownloadedBytes` = 当日累计 − 前一自然日累计，
+  由后端计算；`todayBaselineAvailable` 表示是否有前一自然日快照作基线。
+  **基线不足时移动端显示「基线不足」，绝不用 0 冒充「今天没涨」**；顶层字段缺省时移动端按各站增量求和，
+  并取「所有站点都有基线」为整体基线；
+- `nextClass` / `nextClassRequirement`：等级路线（下一等级与其达成条件），站点未提供等级信息时留空；
+- `contractMet` / `contractNote`：保种契约（H&R / 契约检查）是否达成与说明；未提供该键表示后端未采集，
+  移动端显示「数据未提供」；
+- `policy.alternatives` / `policy.satisfiedAlternative`：**任选条件**（满足其中任一项即达标）与当前已命中的那一项。
+
+## 5.1 站点数据刷新
+
+| 方法 / 路径 | 说明 |
+| --- | --- |
+| `POST /api/v1/sites/{siteId}/refresh` | 刷新单个站点的数据 |
+| `POST /api/v1/sites/refresh` | body `{siteIds?: [...]}`，为空表示全部启用站点 |
+
+刷新为异步动作：后端接受请求后立即返回（2xx 即可），抓取结果通过
+`GET /api/v1/profile` 的 `refreshState` / `refreshedAt` 体现。
+抓取站点页面由后端适配器完成，移动端只触发与消费结果，不下沉站点 HTTP 逻辑。
 
 ## 6. 监护事件
 
@@ -158,21 +210,32 @@
 
 | 方法 / 路径 | 说明 |
 | --- | --- |
-| `POST /api/v1/signin/run` | body `{siteIds: [...]}`，为空表示全部启用站点 |
-| `POST /api/v1/sites/{siteId}/signin` | 单站签到 / 补签 |
+| `POST /api/v1/signin/run` | body `{siteIds?: [...], mode: "both\|signin\|login"}`，`siteIds` 为空表示全部启用站点 |
+| `POST /api/v1/sites/{siteId}/signin` | 单站签到 / 补签，body `{mode}` |
 | `GET /api/v1/signin/records?limit=N` | 最近签到记录 |
+
+`mode` 与参考实现的「签到站点 + 仅模拟登录站点」两类口径一致：
+`both` 两类都处理（默认）/ `signin` 只做签到 / `login` 只做模拟登录。
 
 签到结果：
 
 ```json
 {
   "records": [
-    { "siteId": "s1", "siteName": "站点一", "success": true, "message": "", "signedAt": "..." }
+    {
+      "siteId": "s1", "siteName": "站点一",
+      "success": true, "action": "signin|login",
+      "message": "", "signedAt": "..."
+    }
   ],
   "ranAt": "2026-11-03T08:00:00Z",
   "notice": ""
 }
 ```
+
+`action` 告诉移动端这次做的是签到还是模拟登录；缺省按 `signin` 处理。
+**注意**：并非所有站点都把程序登录 / 签到计为用户活跃（例如馒头），后端与移动端都不应把
+「提示成功」表达成「必然不会掉号」，移动端已在签到中心明确提示该风险。
 
 > 未成功的站点由后端 worker 按 `PT_POCKET_SIGNIN_CRON` 自动补签；
 > 移动端只在「签到中心」展示开关、时间与结果。
