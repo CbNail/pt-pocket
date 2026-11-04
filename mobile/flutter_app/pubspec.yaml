@@ -3,7 +3,7 @@ description: "PT Pocket —— 面向个人 PT 用户的自托管移动管理中
 publish_to: 'none'
 
 # versionName + versionCode（Android）/ CFBundleShortVersionString + CFBundleVersion（iOS）
-version: 0.7.2+13
+version: 0.8.0+14
 
 environment:
   sdk: ^3.13.7
@@ -52,6 +52,9 @@ dependencies:
 
   # Vaultwarden 内置 WebView 登录（不把主密码提交给 NAS）
   webview_flutter: ^4.10.0
+
+  # HTML 解析：直连数据源（监护室公开状态页 / 站点用户页与搜索页）
+  html: ^0.15.4
 
   # 外链跳转（诊断 / 站点官网 / 帮助）
   url_launcher: ^6.3.1

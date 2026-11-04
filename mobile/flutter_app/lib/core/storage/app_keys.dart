@@ -42,6 +42,16 @@ abstract final class PrefKeys {
   static const String cookieCloudHost = 'cookiecloud.host';
   static const String cookieCloudUuid = 'cookiecloud.uuid';
 
+  // 直连数据源（App 直接读取公开状态页与站点用户页，不依赖 NAS 后端）
+  /// 监护室公开数据源的基址（默认 savept.icu，可改）。
+  static const String monitorBaseUrl = 'direct.monitor.baseUrl';
+
+  /// 监护室最近一次成功快照（网络不可用时降级展示，界面标注「缓存」）。
+  static const String monitorCache = 'direct.monitor.cache';
+
+  /// 站点数据历史采样（今日增量 / 时魔估算 / 时间轴）。
+  static const String statsHistory = 'direct.stats.history';
+
   // 推送通道设置与自动补签
   static const String notifySettings = 'notify.settings';
   static const String signInAutoEnabled = 'signin.auto.enabled';

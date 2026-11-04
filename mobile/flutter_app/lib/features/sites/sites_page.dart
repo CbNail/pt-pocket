@@ -4,7 +4,6 @@ import 'package:go_router/go_router.dart';
 
 import '../../core/models/pt_site.dart';
 import '../../core/models/status_models.dart';
-import '../../core/providers.dart';
 import '../../core/router/app_routes.dart';
 import '../../core/services/site_reachability_probe.dart';
 import '../../core/theme/app_colors.dart';
@@ -24,8 +23,9 @@ import 'site_providers.dart';
 /// - 顶部提供「打码」「扩展」「刷新」「更多（PT 历程）」四个入口；
 /// - 支持按「已刷新 / 未刷新 / 失败 / 未登录」四态筛选。
 ///
-/// 数据来源：NAS 后端（`/api/v1/profile` 与 `/api/v1/sites/*/refresh`）。
-/// 后端未实现时站点清单仍可用，只是统计数据缺席——面板会明确说明，而不是显示 0 冒充真实值。
+/// 数据来源：App 直连各站点用户页（`profileDataProvider`），并在本机保存每日采样；
+/// 已配置 NAS 后端时，本地取不到的站点会由后端补齐。
+/// 未取到的字段一律标注「未采集」，而不是显示 0 冒充真实值。
 class SitesPage extends ConsumerStatefulWidget {
   const SitesPage({super.key});
 
@@ -114,20 +114,19 @@ class _SitesPageState extends ConsumerState<SitesPage> {
     await ref.read(siteRefreshControllerProvider.notifier).refreshAll();
     if (!mounted) return;
     final SiteRefreshView after = ref.read(siteRefreshControllerProvider);
-    _snack(after.error == null ? '已下发站点数据刷新（由 NAS 后端逐个抓取）' : '刷新失败：${after.error}');
+    _snack(after.error == null ? '已刷新站点数据（直连各站点用户页）' : '刷新失败：${after.error}');
   }
 
   Future<void> _refreshSite(PtSite site) async {
     await ref.read(siteRefreshControllerProvider.notifier).refreshSite(site.id);
     if (!mounted) return;
     final SiteRefreshView after = ref.read(siteRefreshControllerProvider);
-    _snack(after.error == null ? '已下发「${site.name}」数据刷新' : '刷新失败：${after.error}');
+    _snack(after.error == null ? '已刷新「${site.name}」数据' : '刷新失败：${after.error}');
   }
 
   @override
   Widget build(BuildContext context) {
     final ThemeData theme = Theme.of(context);
-    final bool nasConfigured = ref.watch(endpointProfileProvider).isConfigured;
     final AsyncValue<List<PtSite>> sitesAsync = ref.watch(siteListProvider);
     final AsyncValue<PtDataSnapshot> dataAsync = ref.watch(profileDataProvider);
     final SiteRefreshView refreshView = ref.watch(siteRefreshControllerProvider);
@@ -211,19 +210,12 @@ class _SitesPageState extends ConsumerState<SitesPage> {
       ),
       body: Column(
         children: <Widget>[
-          if (!nasConfigured)
-            const Padding(
-              padding: EdgeInsets.fromLTRB(AppSpacing.lg, AppSpacing.sm, AppSpacing.lg, 0),
-              child: PartialResultBanner(
-                message: '尚未配置 NAS 服务地址；站点的数据统计、签到与巡检在完成服务配对后启用。',
-              ),
-            ),
           if (dataAsync.hasError)
             Padding(
               padding: const EdgeInsets.fromLTRB(AppSpacing.lg, AppSpacing.sm, AppSpacing.lg, 0),
               child: PartialResultBanner(
-                message: '站点数据暂不可用（由 NAS 后端提供）：'
-                    '${dataAsync.error is Object ? '${dataAsync.error}' : ''}',
+                message: '站点数据汇总失败：${dataAsync.error}',
+                onRetry: () => ref.invalidate(profileDataProvider),
               ),
             ),
           Padding(
@@ -533,7 +525,7 @@ class _SiteTile extends StatelessWidget {
           const SizedBox(height: AppSpacing.sm),
           if (stats == null)
             Text(
-              dataMissing ? '站点数据暂不可用（需 NAS 后端）' : '暂无该站数据',
+              dataMissing ? '该站数据暂未取到（可点右上角刷新重试）' : '尚无该站数据',
               style: theme.textTheme.bodySmall,
             )
           else ...<Widget>[
@@ -542,13 +534,16 @@ class _SiteTile extends StatelessWidget {
               const SizedBox(height: AppSpacing.sm),
               _metricsGrid(theme, stats!),
             ],
-            if (stats!.refreshMessage.isNotEmpty &&
-                (refreshState == SiteRefreshState.failed ||
-                    refreshState == SiteRefreshState.notLoggedIn)) ...<Widget>[
+            if (stats!.refreshMessage.isNotEmpty) ...<Widget>[
               const SizedBox(height: AppSpacing.xxs),
               Text(
                 stats!.refreshMessage,
-                style: theme.textTheme.bodySmall?.copyWith(color: theme.colorScheme.error),
+                style: theme.textTheme.bodySmall?.copyWith(
+                  color: refreshState == SiteRefreshState.failed ||
+                          refreshState == SiteRefreshState.notLoggedIn
+                      ? theme.colorScheme.error
+                      : theme.colorScheme.onSurfaceVariant,
+                ),
               ),
             ],
           ],

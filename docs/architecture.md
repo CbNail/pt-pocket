@@ -25,6 +25,19 @@
 - 移动端允许直接发起的网络行为只有三类：**地址可达性探测**（连接测试）、
   **CookieCloud 端到端加密数据的拉取与本地解密**、**内置 WebView 手动登录**。
 
+> **V1.5 修订（直连数据源）**：NAS 后端在本仓库尚未实现（`backend/` 只有目录与约定），
+> 而监护室 / 站点统计 / 我的数据 / 养老进度 / 站内搜索 / 下载器任务此前全部只走 `/api/v1`，
+> 导致这些功能在无后端时一起失败并写成「内网与外网地址均不可用」。因此新增
+> `mobile/flutter_app/lib/core/direct/`，把这几块改为**直连优先、后端可选回退**：
+>
+> - 数据源：公开状态页 `savept.icu`（监护室）、站点用户页与搜索页（NexusPHP 结构，带站点 Cookie）、
+>   qBittorrent WebUI `/api/v2`（下载器任务）；本机还保存每日采样（今日增量 / 时魔估算 / 时间轴）与
+>   内置等级路线（养老进度）。
+> - 产出模型沿用既有模型（`SiteStats` / `PtDataSnapshot` / `SearchResultItem` / `DownloaderTask`）+
+>   新增 `MonitorDashboard`、`SiteUserSnapshot`，因此**页面不区分数据来源**；后端落地后同一批模型可直接切换回后端。
+> - 页面内仍不拼第三方请求、不直连数据库 / Redis；所有第三方协议细节集中在 `lib/core/direct/`。
+> - 直连失败按「本站自己的原因」呈现（缺少凭据 / 登录态失效 / 被限流 / 网络不可达 / 结构未识别）。
+
 ## 2. 仓库结构
 
 ```
@@ -33,7 +46,8 @@
 ├── README.md
 ├── docs/
 │   ├── architecture.md           # 本文件
-│   └── api-contract.md           # 客户端已实现的 /api/v1 契约
+│   ├── api-contract.md           # 客户端已实现的 /api/v1 契约（含 V1.5 直连数据源对照）
+│   └── app-backend-boundary.md   # 每块能力的数据来源与 App / NAS 职责划分
 ├── mobile/flutter_app/           # Flutter 移动端（Android / iOS）
 │   └── lib/
 │       ├── app.dart              # MaterialApp.router 装配

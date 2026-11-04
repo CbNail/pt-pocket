@@ -345,6 +345,7 @@ class _MpAddPageState extends ConsumerState<MpAddPage> {
                     panes: <ChannelPane>[
                       ChannelPane(
                         label: '内网',
+                        accent: ChannelAccent.lan,
                         configured: _lanConfigured,
                         snapshot: lanSnapshot,
                         probing: _lanProbes.isProbing(_lanKey),
@@ -366,6 +367,7 @@ class _MpAddPageState extends ConsumerState<MpAddPage> {
                       ),
                       ChannelPane(
                         label: '外网',
+                        accent: ChannelAccent.wan,
                         configured: _wanConfigured,
                         snapshot: wanSnapshot,
                         probing: _wanProbes.isProbing(_wanKey),

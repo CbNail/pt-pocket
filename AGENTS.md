@@ -19,6 +19,10 @@
 ## 目录职责
 
 - `mobile/flutter_app/`：移动端。页面只做交互与展示，不直接实现站点 HTTP 逻辑。
+  - V1.5 例外（NAS 后端未实现期间）：由 `lib/core/direct/` 统一承担「App 直连数据源」
+    （监护室公开状态页、站点用户页 / 站内搜索页、qBittorrent WebUI、本地每日采样与等级规则）。
+    页面只能消费统一模型，不得自己拼第三方请求；新增直连协议必须先落在该目录，并同步
+    `docs/app-backend-boundary.md` 与规格书。
 - `backend/app/adapters/`：第三方差异隔离层，分 `sites` / `downloaders` / `moviepilot` 三类。
 - `backend/app/api/v1/`：移动端唯一入口，接口前缀 `/api/v1`。
 - `deploy/`：部署编排，服务端代码路径固定为 `/data/docker-compose/pt_pocket` 或其子目录。
@@ -51,6 +55,7 @@
 
 ## 质量门禁
 
-- 移动端：`flutter analyze` 无错误、`flutter test` 全部通过。
+- 移动端：`flutter analyze` 无错误（含 info 级）、`flutter test` 全部通过；
+  直连数据源的解析器必须用页面结构样本做单元测试，失败原因必须按分类呈现，不得写成与数据源无关的结论。
 - 服务端：格式化、静态检查、单元测试与适配器契约测试通过。
 - CI 在 `.github/workflows/` 中维护，`main` 变更必须通过门禁。

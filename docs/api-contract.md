@@ -3,6 +3,13 @@
 本文件列出**移动端代码里已经实现调用**的接口，供 NAS 后端实现对齐。
 所有请求都由移动端经内外网双通道发出，前缀固定 `/api/v1`。
 
+> **V1.5 补充（直连数据源与后端的关系）：** 本文件描述的 `/api/v1` 接口仍是移动端的
+> **唯一后端入口**，但从 V1.5 起，监护室、站点统计 / 我的数据 / 养老进度、站内搜索、
+> 下载器任务在 App 内**优先直连**（公开状态页 savept.icu、站点用户页与搜索页、qBittorrent WebUI），
+> **只有在直连取不到（缺凭据 / 网络不可达 / 被限流 / 结构未识别）且后端已配置时**才回退到这里列出的接口。
+> 也就是说：这些接口现在是**可选回退通道**，而不是唯一数据来源；直连实现与产出模型见
+> `docs/app-backend-boundary.md` 与规格书 §22。
+
 约定：
 
 - 认证：移动端在请求头带 `X-Session-Token`（配对后由后端下发，存本机安全存储）；
@@ -250,3 +257,17 @@
 
 企业微信 Webhook Key、Telegram Bot Token / Chat ID 由移动端配置在本地，
 实际发送由后端执行；后端需要的凭据应通过配对/配置接口同步，不得回显明文。
+## 9. 直连数据源（不走 `/api/v1`，列在此处便于对照）
+
+以下通道由 App 自己发起，NAS 后端**不参与**（后端实现后仍可保留为回退）：
+
+| 能力 | 目标 | 说明 |
+| --- | --- | --- |
+| 监护室 | `GET https://savept.icu/` | 解析站点卡片与病危 / 恢复 / 站庆 / 死亡公告；基址可改（偏好 `ptp.direct.monitor.baseUrl`） |
+| 监护室历史事件 | `GET /api/history/dead?page=N`、`GET /api/history/anniversary?page=N` | 返回 `{items, next_page, has_more}`；`items[i] = {date, event_label, name, url, description}` |
+| 站点用户页 | `GET {站点}/index.php` | 带该站 Cookie；解析上传 / 下载 / 分享率 / 魔力 / 做种 / 下载中 / 邀请 / 未读邮件 / H&R / 等级 / 注册时间 |
+| 站内搜索 | `GET {站点}/torrents.php?search=关键字&notnewword=1[&page=N]` | 带该站 Cookie；解析结果行（id / 标题 / 大小 / 做种 / 下载 / 促销 / 分类 / 发布时间）；下载地址 `{站点}/download.php?id=<id>[&passkey=<passkey>]` |
+| 下载器（qBittorrent） | `POST {下载器}/api/v2/auth/login`、`GET /api/v2/torrents/info`、`GET /api/v2/transfer/info`、`GET /api/v2/app/version`、`GET /api/v2/torrents/categories|tags`、`GET /api/v2/app/defaultSavePath`、`POST /api/v2/torrents/{pause|resume|delete|setCategory|addTags|removeTags|setLocation}` | 表单登录取 `SID` 并复用；写操作参数 `hashes`（多个用 `|` 连接） |
+
+> 直连失败一律在界面上按**分类 + 可执行建议**呈现（缺少凭据 / 登录被拒绝 / 被限流 /
+> 地址不可达 / 返回结构异常），不得把这些失败写成与 NAS 服务地址相关的原因。

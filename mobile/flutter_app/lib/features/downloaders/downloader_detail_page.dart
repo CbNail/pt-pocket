@@ -2,11 +2,11 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 
+import '../../core/direct/downloader_gateway.dart';
+import '../../core/direct/qbittorrent_client.dart';
 import '../../core/models/downloader.dart';
 import '../../core/network/api_exception.dart';
-import '../../core/providers.dart';
 import '../../core/router/app_routes.dart';
-import '../../core/services/downloader_api.dart';
 import '../../core/theme/app_colors.dart';
 import '../../core/theme/design_tokens.dart';
 import '../../core/utils/format.dart';
@@ -21,8 +21,9 @@ import 'downloader_providers.dart';
 /// ——外层那个状态圆点已经表达「连接是否正常」，进来后重复展示只是噪音。
 /// 本页只做任务本身：筛选、排序、批量操作与单条任务操作。
 ///
-/// 任务数据与操作统一经 NAS 后端接口下发；服务端适配器负责与
-/// qBittorrent / Transmission / Aria2 等引擎交互。
+/// 任务数据与操作走 [DownloaderGateway]：qBittorrent 直接调用 WebUI（`/api/v2`）
+/// 取任务与下发操作（参考 PT-depiler「我的下载器」与 Bit Control 之类的客户端），
+/// 其余引擎或本地取不到时回退 NAS 后端接口。
 class DownloaderDetailPage extends ConsumerStatefulWidget {
   const DownloaderDetailPage({super.key, required this.downloaderId});
 
@@ -61,7 +62,7 @@ class _DownloaderDetailPageState extends ConsumerState<DownloaderDetailPage> {
 
   Future<void> _taskAction(List<String> hashes, String action) async {
     if (hashes.isEmpty) return;
-    final DownloaderApi api = ref.read(downloaderApiProvider);
+    final DownloaderGateway api = ref.read(downloaderGatewayProvider);
     if (hashes.length == 1) setState(() => _busyHash = hashes.first);
     setState(() => _busyBatch = hashes.length > 1);
     try {
@@ -74,6 +75,8 @@ class _DownloaderDetailPageState extends ConsumerState<DownloaderDetailPage> {
       _snack(hashes.length == 1 ? '已下发${action == 'pause' ? '暂停' : '继续'}' : '已批量下发 ${hashes.length} 条');
       _invalidateTasks();
     } on ApiException catch (error) {
+      _snack('操作失败：${error.message}');
+    } on DownloaderFetchException catch (error) {
       _snack('操作失败：${error.message}');
     } finally {
       if (mounted) {
@@ -117,12 +120,14 @@ class _DownloaderDetailPageState extends ConsumerState<DownloaderDetailPage> {
     setState(() => _busyBatch = hashes.length > 1);
     try {
       await ref
-          .read(downloaderApiProvider)
+          .read(downloaderGatewayProvider)
           .remove(widget.downloaderId, hashes, deleteFiles: deleteFiles);
       _snack(deleteFiles ? '已下发删除任务与文件' : '已下发移除任务');
       setState(() => _selected.clear());
       _invalidateTasks();
     } on ApiException catch (error) {
+      _snack('操作失败：${error.message}');
+    } on DownloaderFetchException catch (error) {
       _snack('操作失败：${error.message}');
     } finally {
       if (mounted) setState(() => _busyBatch = false);
@@ -154,7 +159,7 @@ class _DownloaderDetailPageState extends ConsumerState<DownloaderDetailPage> {
     );
     if (category == null) return;
     try {
-      await ref.read(downloaderApiProvider).setCategory(widget.downloaderId, hashes, category);
+      await ref.read(downloaderGatewayProvider).setCategory(widget.downloaderId, hashes, category);
       _snack(category.isEmpty ? '已清除分类' : '已改为分类「$category」');
       _invalidateTasks();
     } on ApiException catch (error) {
@@ -170,7 +175,7 @@ class _DownloaderDetailPageState extends ConsumerState<DownloaderDetailPage> {
     final _TagsResult? result = await _showTagsDialog(options.tags);
     if (result == null) return;
     try {
-      await ref.read(downloaderApiProvider).setTags(
+      await ref.read(downloaderGatewayProvider).setTags(
             widget.downloaderId,
             hashes,
             result.tags,
@@ -195,7 +200,7 @@ class _DownloaderDetailPageState extends ConsumerState<DownloaderDetailPage> {
     );
     if (path == null || path.trim().isEmpty) return;
     try {
-      await ref.read(downloaderApiProvider).setLocation(widget.downloaderId, hashes, path.trim());
+      await ref.read(downloaderGatewayProvider).setLocation(widget.downloaderId, hashes, path.trim());
       _snack('已改保存路径为 ${path.trim()}');
       _invalidateTasks();
     } on ApiException catch (error) {
@@ -381,7 +386,6 @@ class _DownloaderDetailPageState extends ConsumerState<DownloaderDetailPage> {
       );
     }
 
-    final bool nasConfigured = ref.watch(endpointProfileProvider).isConfigured;
     final AsyncValue<List<DownloaderTask>> tasksAsync =
         ref.watch(downloaderTasksProvider(widget.downloaderId));
 
@@ -425,21 +429,20 @@ class _DownloaderDetailPageState extends ConsumerState<DownloaderDetailPage> {
           const SizedBox(width: AppSpacing.xs),
         ],
       ),
-      body: !nasConfigured
-          ? const EmptyStateView(
-              icon: Icons.link_off,
-              title: '尚未配置 NAS 服务地址',
-              message: '任务列表由 NAS 后端从各下载器拉取，请先完成服务配对。',
-            )
-          : tasksAsync.when(
-              loading: () => const LoadingStateView(message: '正在读取任务'),
-              error: (Object error, StackTrace stackTrace) => ErrorStateView(
-                title: '任务获取失败',
-                message: error is ApiException ? error.message : '$error',
-                onRetry: _invalidateTasks,
-              ),
-              data: (List<DownloaderTask> tasks) => _tasksView(theme, tasks),
-            ),
+      body: tasksAsync.when(
+        loading: () => const LoadingStateView(message: '正在读取任务'),
+        error: (Object error, StackTrace stackTrace) => ErrorStateView(
+          title: '任务获取失败',
+          // 直接把失败原因（凭据 / 白名单 / 网络）显示出来，便于就地修正。
+          message: switch (error) {
+            ApiException e => e.message,
+            DownloaderFetchException e => '${e.kind.label}：${e.message}',
+            _ => '$error',
+          },
+          onRetry: _invalidateTasks,
+        ),
+        data: (List<DownloaderTask> tasks) => _tasksView(theme, tasks),
+      ),
       bottomNavigationBar: _selectionMode ? _batchBar(theme, tasksAsync.valueOrNull) : null,
     );
   }
@@ -451,9 +454,14 @@ class _DownloaderDetailPageState extends ConsumerState<DownloaderDetailPage> {
     }.toList(growable: false)
       ..sort();
 
+    final QbTransferInfo? transfer = ref
+        .watch(downloaderTransferProvider(widget.downloaderId))
+        .valueOrNull;
+
     return Column(
       children: <Widget>[
-        _filterBar(theme, servers),
+        if (transfer != null) _transferBar(theme, transfer),
+        _filterBar(theme, servers, tasks),
         Padding(
           padding: const EdgeInsets.fromLTRB(AppSpacing.lg, 0, AppSpacing.lg, AppSpacing.xs),
           child: Align(
@@ -513,7 +521,48 @@ class _DownloaderDetailPageState extends ConsumerState<DownloaderDetailPage> {
     );
   }
 
-  Widget _filterBar(ThemeData theme, List<String> servers) {
+  /// 全局传输状态条（速度 / 累计流量 / 版本），qBittorrent 直连时可见。
+  Widget _transferBar(ThemeData theme, QbTransferInfo info) {
+    final List<(String, String)> items = <(String, String)>[
+      ('下载速度', formatSpeed(info.downloadSpeed)),
+      ('上传速度', formatSpeed(info.uploadSpeed)),
+      ('本次下载', formatBytes(info.downloadedBytes)),
+      ('本次上传', formatBytes(info.uploadedBytes)),
+    ];
+    return Container(
+      margin: const EdgeInsets.fromLTRB(AppSpacing.lg, AppSpacing.sm, AppSpacing.lg, 0),
+      padding: const EdgeInsets.symmetric(horizontal: AppSpacing.md, vertical: AppSpacing.sm),
+      decoration: BoxDecoration(
+        color: theme.colorScheme.surfaceContainerHigh,
+        borderRadius: AppRadius.cardBorder,
+      ),
+      child: Row(
+        children: <Widget>[
+          for (int i = 0; i < items.length; i++) ...<Widget>[
+            if (i > 0) const SizedBox(width: AppSpacing.md),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: <Widget>[
+                  Text(items[i].$1, style: theme.textTheme.labelSmall),
+                  Text(
+                    items[i].$2,
+                    style: theme.textTheme.bodySmall?.copyWith(fontWeight: FontWeight.w600),
+                  ),
+                ],
+              ),
+            ),
+          ],
+          if (info.version.isNotEmpty)
+            StatusBadge(label: 'qB ${info.version}', tone: StatusTone.info, compact: true),
+        ],
+      ),
+    );
+  }
+
+  Widget _filterBar(ThemeData theme, List<String> servers, List<DownloaderTask> tasks) {
+    int countOf(TaskState state) =>
+        tasks.where((DownloaderTask task) => task.state == state).length;
     return Padding(
       padding: const EdgeInsets.fromLTRB(AppSpacing.lg, AppSpacing.sm, AppSpacing.lg, AppSpacing.xs),
       child: Column(
@@ -539,7 +588,16 @@ class _DownloaderDetailPageState extends ConsumerState<DownloaderDetailPage> {
                 TaskState.error,
               ])
                 FilterChip(
-                  label: Text(state.label),
+                  // 带上各状态数量（和 Bit Control 之类的客户端一样一眼看出分布），
+                  // 数量单独放一个 Text，状态名仍是独立文本节点，便于读屏与按文本查找。
+                  label: Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: <Widget>[
+                      Text(state.label),
+                      const SizedBox(width: AppSpacing.xxs),
+                      Text('${countOf(state)}', style: theme.textTheme.labelSmall),
+                    ],
+                  ),
                   selected: _query.statuses.contains(state),
                   onSelected: (bool value) => setState(() {
                     final Set<TaskState> next = <TaskState>{..._query.statuses};

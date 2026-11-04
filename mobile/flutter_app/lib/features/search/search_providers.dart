@@ -2,6 +2,9 @@ import 'package:dio/dio.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../core/adapters/moviepilot_adapter_registry.dart';
+import '../../core/direct/direct_providers.dart';
+import '../../core/direct/nexusphp_client.dart';
+import '../../core/direct/site_search_gateway.dart';
 import '../../core/models/moviepilot.dart';
 import '../../core/models/pt_site.dart';
 import '../../core/models/service_health.dart';
@@ -252,10 +255,22 @@ typedef SiteSearchFn = Future<SearchPageResult> Function(
   CancelToken? cancelToken,
 });
 
-/// 默认实现：把单站请求交给 [searchApiProvider]。
+/// 逐站检索通道：**App 直连站点**（`torrents.php?search=`）为主，
+/// NAS 后端可用时对本地取不到的站点（缺 Cookie / 网络不通）回退后端接口。
+final Provider<SiteSearchGateway> siteSearchGatewayProvider = Provider<SiteSearchGateway>(
+  (Ref ref) => SiteSearchGateway(
+    () => ref.read(endpointProfileProvider).isConfigured,
+    (String siteId) => ref.read(siteByIdProvider(siteId)),
+    (String siteId) => ref.read(siteRepositoryProvider).readCredential(siteId),
+    direct: ref.watch(nexusPhpClientProvider),
+    nas: ref.watch(searchApiProvider),
+  ),
+);
+
+/// 默认实现：把单站请求交给逐站检索通道（直连优先）。
 final Provider<SiteSearchFn> siteSearchFnProvider = Provider<SiteSearchFn>(
   (Ref ref) => (SearchRequest request, {CancelToken? cancelToken}) =>
-      ref.read(searchApiProvider).search(request, cancelToken: cancelToken),
+      ref.read(siteSearchGatewayProvider).search(request, cancelToken: cancelToken),
 );
 
 /// 跨站合并后的统一排序。
@@ -638,11 +653,17 @@ class SearchController extends Notifier<SearchState> {
             phase: cancelToken.isCancelled ? SiteSearchPhase.cancelled : SiteSearchPhase.failed,
             message: error.message,
           );
+        } on SiteFetchException catch (error) {
+          if (token != _runToken) return;
+          progress[site.id] = progress[site.id]!.copyWith(
+            phase: cancelToken.isCancelled ? SiteSearchPhase.cancelled : SiteSearchPhase.failed,
+            message: error.message,
+          );
         } on EndpointUnavailableException catch (error) {
           if (token != _runToken) return;
           progress[site.id] = progress[site.id]!.copyWith(
             phase: cancelToken.isCancelled ? SiteSearchPhase.cancelled : SiteSearchPhase.failed,
-            message: error.toString(),
+            message: '${error.toString()}（该站点需要 NAS 后端转发检索）',
           );
         } catch (error) {
           if (token != _runToken) return;
@@ -693,7 +714,7 @@ class SearchController extends Notifier<SearchState> {
         : const <String>[];
 
     try {
-      final SearchPageResult result = await ref.read(searchApiProvider).search(
+      final SearchPageResult result = await ref.read(siteSearchGatewayProvider).search(
             SearchRequest(
               keyword: state.keyword,
               siteIds: siteIds,
@@ -719,7 +740,13 @@ class SearchController extends Notifier<SearchState> {
     } on ApiException catch (error) {
       state = state.copyWith(loading: false, loadingMore: false, error: error.message);
     } on EndpointUnavailableException catch (error) {
-      state = state.copyWith(loading: false, loadingMore: false, error: error.toString());
+      state = state.copyWith(
+        loading: false,
+        loadingMore: false,
+        error: '${error.toString()}（聚合检索需要 NAS 后端；可在搜索范围里选「已启用站点」按站直连检索）',
+      );
+    } on SiteFetchException catch (error) {
+      state = state.copyWith(loading: false, loadingMore: false, error: error.message);
     }
   }
 }

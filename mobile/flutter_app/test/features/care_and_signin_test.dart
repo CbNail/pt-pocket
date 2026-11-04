@@ -12,11 +12,15 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:pt_pocket/core/models/pt_site.dart';
 import 'package:pt_pocket/core/models/status_models.dart';
 import 'package:pt_pocket/core/network/api_client.dart';
 import 'package:pt_pocket/core/network/endpoint_resolver.dart';
 import 'package:pt_pocket/core/providers.dart';
 import 'package:pt_pocket/core/services/status_api.dart';
+import 'package:pt_pocket/core/storage/prefs_store.dart';
+import 'package:pt_pocket/core/storage/secure_store.dart';
+import 'package:pt_pocket/core/storage/site_repository.dart';
 import 'package:pt_pocket/features/monitor/signin_page.dart';
 import 'package:pt_pocket/features/profile/pt_data_page.dart';
 import 'package:pt_pocket/features/settings/status_providers.dart';
@@ -360,6 +364,16 @@ void main() {
           },
         ],
       });
+      // 「我的数据」按本机启用站点聚合：先把两个站点写进本地清单。
+      final SiteRepository repository =
+          SiteRepository(prefs: PrefsStore(prefs), secure: SecureStore());
+      await repository.upsert(
+        const PtSite(id: 's1', name: '甲站', baseUrl: 'https://a.example'),
+      );
+      await repository.upsert(
+        const PtSite(id: 's2', name: '乙站', baseUrl: 'https://b.example'),
+      );
+
       final ProviderContainer c = ProviderContainer(
         overrides: <Override>[
           sharedPreferencesProvider.overrideWithValue(prefs),

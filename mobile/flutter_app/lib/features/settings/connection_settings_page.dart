@@ -230,7 +230,8 @@ class _ConnectionSettingsPageState extends ConsumerState<ConnectionSettingsPage>
         children: <Widget>[
           SectionCard(
             title: '服务地址',
-            subtitle: '协议点选、主机与端口分开填；左侧切换内网 / 外网，填完即自动检测，整体情况在最下方',
+            subtitle: '协议点选、主机与端口分开填；点左侧按钮在内网 / 外网之间切换（按钮底色随通道变化），'
+                '填完即自动检测，整体情况在最下方',
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: <Widget>[
@@ -240,6 +241,7 @@ class _ConnectionSettingsPageState extends ConsumerState<ConnectionSettingsPage>
                   panes: <ChannelPane>[
                     ChannelPane(
                       label: '内网',
+                      accent: ChannelAccent.lan,
                       configured: _lanConfigured,
                       snapshot: _lanProbes.snapshot(_lanKey),
                       probing: _lanProbes.isProbing(_lanKey),
@@ -259,6 +261,7 @@ class _ConnectionSettingsPageState extends ConsumerState<ConnectionSettingsPage>
                     ),
                     ChannelPane(
                       label: '外网',
+                      accent: ChannelAccent.wan,
                       configured: _wanConfigured,
                       snapshot: _wanProbes.snapshot(_wanKey),
                       probing: _wanProbes.isProbing(_wanKey),
@@ -297,10 +300,13 @@ class _ConnectionSettingsPageState extends ConsumerState<ConnectionSettingsPage>
                   activeLabel: _activeLabel(),
                 ),
                 const SizedBox(height: AppSpacing.md),
-                FilledButton.tonalIcon(
-                  onPressed: _checking ? null : _testBoth,
-                  icon: const Icon(Icons.network_check, size: AppSizes.iconSm),
-                  label: Text(_checking ? '检测中…' : '重新检测两条通道'),
+                SizedBox(
+                  width: double.infinity,
+                  child: FilledButton.tonalIcon(
+                    onPressed: _checking ? null : _testBoth,
+                    icon: const Icon(Icons.network_check, size: AppSizes.iconSm),
+                    label: Text(_checking ? '检测中…' : '重新检测两条通道'),
+                  ),
                 ),
               ],
             ),
@@ -339,10 +345,13 @@ class _ConnectionSettingsPageState extends ConsumerState<ConnectionSettingsPage>
             ),
           ),
           const SizedBox(height: AppSpacing.xl),
-          FilledButton.icon(
-            onPressed: _saving ? null : _save,
-            icon: const Icon(Icons.check, size: AppSizes.iconSm),
-            label: Text(_saving ? '保存中…' : '保存连接设置'),
+          SizedBox(
+            width: double.infinity,
+            child: FilledButton.icon(
+              onPressed: _saving ? null : _save,
+              icon: const Icon(Icons.check, size: AppSizes.iconSm),
+              label: Text(_saving ? '保存中…' : '保存连接设置'),
+            ),
           ),
         ],
       ),

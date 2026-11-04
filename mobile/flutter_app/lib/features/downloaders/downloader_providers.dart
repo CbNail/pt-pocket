@@ -1,5 +1,8 @@
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../../core/direct/direct_providers.dart';
+import '../../core/direct/downloader_gateway.dart';
+import '../../core/direct/qbittorrent_client.dart';
 import '../../core/models/downloader.dart';
 import '../../core/providers.dart';
 import '../../core/services/downloader_api.dart';
@@ -140,17 +143,37 @@ final Provider<DownloaderConfig?> defaultDownloaderProvider = Provider<Downloade
   },
 );
 
-/// 某个下载器的任务列表（数据来自 NAS 后端）。
+/// 下载器数据通道：qBittorrent 直连 WebUI（`/api/v2`）为主，NAS 后端可用时补充。
+final Provider<DownloaderGateway> downloaderGatewayProvider = Provider<DownloaderGateway>(
+  (Ref ref) => DownloaderGateway(
+    () => ref.read(endpointProfileProvider).isConfigured,
+    (String downloaderId) => ref.read(downloaderByIdProvider(downloaderId)),
+    (String downloaderId) =>
+        ref.read(downloaderRepositoryProvider).readCredential(downloaderId),
+    nas: ref.watch(downloaderApiProvider),
+    qb: ref.watch(qbittorrentClientProvider),
+  ),
+);
+
+/// 某个下载器的任务列表（qBittorrent 直连 / 后端转发）。
 final FutureProviderFamily<List<DownloaderTask>, String> downloaderTasksProvider =
     FutureProvider.family<List<DownloaderTask>, String>(
-  (Ref ref, String downloaderId) => ref.watch(downloaderApiProvider).fetchTasks(downloaderId),
+  (Ref ref, String downloaderId) =>
+      ref.watch(downloaderGatewayProvider).fetchTasks(downloaderId),
 );
 
 /// 某个下载器的可选分类 / 标签 / 路径（供任务批量操作的选择器）。
 final FutureProviderFamily<DownloaderTaskOption, String> downloaderTaskOptionsProvider =
     FutureProvider.family<DownloaderTaskOption, String>(
   (Ref ref, String downloaderId) =>
-      ref.watch(downloaderApiProvider).fetchTaskOptions(downloaderId),
+      ref.watch(downloaderGatewayProvider).fetchTaskOptions(downloaderId),
+);
+
+/// 下载器全局传输状态（qBittorrent 直连时可用；任务页头部的速度条）。
+final FutureProviderFamily<QbTransferInfo?, String> downloaderTransferProvider =
+    FutureProvider.family<QbTransferInfo?, String>(
+  (Ref ref, String downloaderId) =>
+      ref.watch(downloaderGatewayProvider).fetchTransferInfo(downloaderId),
 );
 
 /// 下载器凭据（异步读取安全存储）。

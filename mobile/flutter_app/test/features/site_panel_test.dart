@@ -217,6 +217,8 @@ void main() {
           profileApiProvider.overrideWith((Ref ref) => ProfileApi(client: _clientWith(profileAdapter))),
           siteStatsApiProvider
               .overrideWith((Ref ref) => SiteStatsApi(client: _clientWith(commandAdapter))),
+          // 站点未录入本地 Cookie 时，数据会回退到 NAS 后端；这里声明后端地址已配置。
+          endpointProfileProvider.overrideWith(_ConfiguredEndpoint.new),
         ],
       );
       return (c, commandAdapter);
@@ -336,7 +338,7 @@ void main() {
         <String>['s1', 's2'],
         reason: '刷新的范围应是全部启用站点',
       );
-      expect(find.textContaining('已下发站点数据刷新'), findsOneWidget);
+      expect(find.textContaining('已刷新站点数据'), findsOneWidget);
     });
 
     testWidgets('「更多」入口可进 PT 历程', (WidgetTester tester) async {
@@ -353,4 +355,13 @@ void main() {
       expect(find.text('PT 历程页'), findsOneWidget);
     });
   });
+}
+
+/// 已配置 NAS 地址的链路档案（直连取不到数据的站点回退到后端）。
+class _ConfiguredEndpoint extends EndpointProfileNotifier {
+  @override
+  EndpointProfile build() => EndpointProfile(
+        lanBaseUrl: Uri.parse('http://192.168.1.10:8000'),
+        mode: LinkMode.auto,
+      );
 }

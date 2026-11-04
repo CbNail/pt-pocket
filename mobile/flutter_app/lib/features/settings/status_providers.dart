@@ -1,6 +1,10 @@
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../../core/direct/direct_providers.dart';
+import '../../core/direct/site_stats_service.dart';
+import '../../core/direct/stats_history_store.dart';
 import '../../core/models/notify_settings.dart';
+import '../../core/models/pt_site.dart';
 import '../../core/models/status_models.dart';
 import '../../core/network/api_exception.dart';
 import '../../core/providers.dart';
@@ -13,6 +17,7 @@ import '../sites/site_providers.dart';
 
 // ---------------------------------------------------------------- 接口
 
+/// NAS 后端接口（保留：本地直连取不到的站点可由后端补齐）。
 final Provider<ProfileApi> profileApiProvider =
     Provider<ProfileApi>((Ref ref) => ProfileApi(client: ref.watch(apiClientProvider)));
 
@@ -28,16 +33,119 @@ final Provider<SignInApi> signInApiProvider =
 final Provider<NotifyApi> notifyApiProvider =
     Provider<NotifyApi>((Ref ref) => NotifyApi(client: ref.watch(apiClientProvider)));
 
+// ---------------------------------------------------------------- 单站数据（直连优先）
+
+/// 站点数据组装服务：直连用户页 + 本地历史 + 等级规则。
+final Provider<SiteStatsService> siteStatsServiceProvider = Provider<SiteStatsService>(
+  (Ref ref) => SiteStatsService(
+    client: ref.watch(nexusPhpClientProvider),
+    history: ref.watch(statsHistoryStoreProvider),
+  ),
+);
+
+/// 单站数据：App 直连站点用户页采集。
+///
+/// 回退顺序：本地直连 → （配置了 NAS 时）后端 `/api/v1/profile`。
+/// 失败时返回带具体原因的 [SiteStats]（缺凭据 / 登录态失效 / 被限流 / 网络不可达），
+/// 而不是把整页数据变成「内网与外网地址均不可用」这类与服务地址无关的报错。
+final FutureProviderFamily<SiteStats, String> siteStatsProvider =
+    FutureProvider.family<SiteStats, String>((Ref ref, String siteId) async {
+  final PtSite? site = ref.watch(siteByIdProvider(siteId));
+  if (site == null) {
+    return SiteStats(
+      siteId: siteId,
+      siteName: '',
+      refreshState: SiteRefreshState.failed,
+      refreshMessage: '站点已不存在（$siteId），请刷新站点列表',
+      signInKnown: false,
+    );
+  }
+
+  final Map<String, dynamic>? credential = await ref.watch(siteCredentialProvider(siteId).future);
+  final SiteStatsService service = ref.watch(siteStatsServiceProvider);
+  final SiteStats stats = await service.fetchSite(site, credential: credential);
+  if (stats.refreshState == SiteRefreshState.refreshed) return stats;
+
+  // 本地取不到（缺凭据 / 网络 / 限流）：配置了 NAS 后端就让后端再试一次。
+  final bool localProblem = stats.refreshState == SiteRefreshState.notLoggedIn ||
+      stats.refreshState == SiteRefreshState.failed;
+  if (localProblem && ref.watch(endpointProfileProvider).isConfigured) {
+    try {
+      final PtDataSnapshot snapshot =
+          await ref.read(profileApiProvider).fetch(siteIds: <String>[siteId]);
+      for (final SiteStats item in snapshot.sites) {
+        if (item.siteId == siteId) return item;
+      }
+    } catch (_) {
+      // 后端也不可用：保留直连给出的、更贴近本地实际的原因。
+    }
+  }
+  return stats;
+});
+
 // ---------------------------------------------------------------- 个人数据
 
-/// 个人 PT 数据（历程 / 统计），按启用站点聚合（需求 2）。
-final FutureProvider<PtDataSnapshot> profileDataProvider = FutureProvider<PtDataSnapshot>((Ref ref) {
-  final List<String> siteIds =
-      (ref.watch(siteListProvider).valueOrNull ?? const <dynamic>[])
-          .where((dynamic s) => s.enabled == true)
-          .map((dynamic s) => s.id as String)
-          .toList(growable: false);
-  return ref.watch(profileApiProvider).fetch(siteIds: siteIds);
+/// 启用站点清单（首次进入时等待一次清单加载）。
+Future<List<PtSite>> _enabledSites(Ref ref) async {
+  List<PtSite> sites = ref.watch(siteListProvider).valueOrNull ?? const <PtSite>[];
+  if (sites.isEmpty) {
+    try {
+      sites = await ref.watch(siteListProvider.future);
+    } catch (_) {
+      sites = const <PtSite>[];
+    }
+  }
+  return sites.where((PtSite s) => s.enabled).toList(growable: false);
+}
+
+/// 个人 PT 数据（我的数据 / 数据统计 / 养老进度），按启用站点聚合。
+///
+/// 数据来自 [siteStatsProvider]（直连各站点用户页），因此「我的数据」「养老进度」
+/// 不再依赖尚未实现的 NAS 后端即可用；本地历史提供今日增量与时间轴。
+final FutureProvider<PtDataSnapshot> profileDataProvider = FutureProvider<PtDataSnapshot>(
+  (Ref ref) async {
+    final List<PtSite> sites = await _enabledSites(ref);
+    if (sites.isEmpty) return const PtDataSnapshot(sites: <SiteStats>[]);
+
+    final List<SiteStats> stats = await Future.wait(
+      sites.map((PtSite site) => ref.watch(siteStatsProvider(site.id).future)),
+    );
+
+    final List<SiteStats> withBaseline =
+        stats.where((SiteStats s) => s.todayBaselineAvailable).toList(growable: false);
+    final int failed = stats
+        .where((SiteStats s) =>
+            s.refreshState == SiteRefreshState.failed ||
+            s.refreshState == SiteRefreshState.notLoggedIn)
+        .length;
+    final bool allBaseline = withBaseline.length == stats.length && stats.isNotEmpty;
+
+    final List<String> notes = <String>[
+      '数据由 App 直连各站点用户页采集，并在本机保存每日采样（用于今日增量与综合时魔估算）',
+      if (failed > 0) '$failed 个站点本次未取到数据，卡片上有具体原因',
+      if (!allBaseline) '今日增量只统计已有前一自然日基线的站点，其余显示「基线不足」',
+    ];
+
+    return PtDataSnapshot(
+      sites: stats,
+      generatedAt: DateTime.now(),
+      notice: notes.join('；'),
+      todayUploadedBytes: withBaseline.isEmpty
+          ? null
+          : withBaseline.fold<int>(0, (int sum, SiteStats s) => sum + s.todayUploadedBytes),
+      todayDownloadedBytes: withBaseline.isEmpty
+          ? null
+          : withBaseline.fold<int>(0, (int sum, SiteStats s) => sum + s.todayDownloadedBytes),
+      todayBaselineAvailable: allBaseline,
+    );
+  },
+);
+
+/// 单站时间轴（近 30 天有采样的自然日）；数据刷新后自动重算。
+final ProviderFamily<List<TrendPoint>, String> siteTrendProvider =
+    Provider.family<List<TrendPoint>, String>((Ref ref, String siteId) {
+  ref.watch(profileDataProvider);
+  return ref.watch(statsHistoryStoreProvider).trend(siteId, days: 30);
 });
 
 // ---------------------------------------------------------------- 站点数据刷新
@@ -56,9 +164,9 @@ class SiteRefreshView {
   bool get busy => refreshingAll || refreshingSiteId != null;
 }
 
-/// 站点数据刷新控制器：顶部「刷新」刷新全部，卡片内可单独刷新某站。
+/// 站点数据刷新控制器：刷新 = 重新直连站点用户页（并让 NAS 后端也刷一次，若已配置）。
 ///
-/// 刷新后统一失效 [profileDataProvider]——站点页与「我的数据」共用同一份数据口径。
+/// 刷新后统一失效 [profileDataProvider]——站点页与「我的数据」「养老进度」共用同一份数据。
 final NotifierProvider<SiteRefreshController, SiteRefreshView> siteRefreshControllerProvider =
     NotifierProvider<SiteRefreshController, SiteRefreshView>(SiteRefreshController.new);
 
@@ -66,37 +174,56 @@ class SiteRefreshController extends Notifier<SiteRefreshView> {
   @override
   SiteRefreshView build() => const SiteRefreshView();
 
+  bool get _nasConfigured => ref.read(endpointProfileProvider).isConfigured;
+
+  List<String> _enabledIds() =>
+      (ref.read(siteListProvider).valueOrNull ?? const <PtSite>[])
+          .where((PtSite s) => s.enabled)
+          .map((PtSite s) => s.id)
+          .toList(growable: false);
+
   Future<void> refreshAll() async {
     state = const SiteRefreshView(refreshingAll: true);
+    final List<String> ids = _enabledIds();
+    if (_nasConfigured) {
+      try {
+        await ref.read(siteStatsApiProvider).refreshAll(siteIds: ids);
+      } on ApiException {
+        // 后端不可用时不影响直连刷新。
+      }
+    }
     try {
-      final List<String> siteIds =
-          (ref.read(siteListProvider).valueOrNull ?? const <dynamic>[])
-              .where((dynamic s) => s.enabled == true)
-              .map((dynamic s) => s.id as String)
-              .toList(growable: false);
-      await ref.read(siteStatsApiProvider).refreshAll(siteIds: siteIds);
+      ref.invalidate(siteStatsProvider);
+      await ref.read(profileDataProvider.future);
       state = const SiteRefreshView();
-      ref.invalidate(profileDataProvider);
-    } on ApiException catch (error) {
-      state = SiteRefreshView(error: error.message);
+    } catch (error) {
+      state = SiteRefreshView(error: '$error');
     }
   }
 
   Future<void> refreshSite(String siteId) async {
     state = SiteRefreshView(refreshingSiteId: siteId);
+    if (_nasConfigured) {
+      try {
+        await ref.read(siteStatsApiProvider).refreshSite(siteId);
+      } on ApiException {
+        // 同上：后端失败不阻塞直连刷新。
+      }
+    }
     try {
-      await ref.read(siteStatsApiProvider).refreshSite(siteId);
-      state = const SiteRefreshView();
+      ref.invalidate(siteStatsProvider(siteId));
+      await ref.read(siteStatsProvider(siteId).future);
       ref.invalidate(profileDataProvider);
-    } on ApiException catch (error) {
-      state = SiteRefreshView(error: error.message);
+      state = const SiteRefreshView();
+    } catch (error) {
+      state = SiteRefreshView(error: '$error');
     }
   }
 }
 
-// ---------------------------------------------------------------- 监护室
+// ---------------------------------------------------------------- 监护室（NAS 巡检，可选）
 
-/// 监护事件流（需求 6）。
+/// NAS 后端的监护事件流（后端已部署时作为补充来源；监护室主数据来自公开状态页）。
 final FutureProvider<List<MonitorEvent>> monitorEventsProvider =
     FutureProvider<List<MonitorEvent>>((Ref ref) {
   return ref.watch(monitorApiProvider).fetchEvents();
@@ -180,9 +307,9 @@ class SignInController extends Notifier<SignInState> {
   /// 一键签到：对启用站点批量下发。[mode] 见 [SignInMode]。
   Future<void> runAll({SignInMode mode = SignInMode.both}) async {
     final List<String> siteIds =
-        (ref.read(siteListProvider).valueOrNull ?? const <dynamic>[])
-            .where((dynamic s) => s.enabled == true)
-            .map((dynamic s) => s.id as String)
+        (ref.read(siteListProvider).valueOrNull ?? const <PtSite>[])
+            .where((PtSite s) => s.enabled)
+            .map((PtSite s) => s.id)
             .toList(growable: false);
     await _run(() => ref.read(signInApiProvider).runAll(siteIds: siteIds, mode: mode));
   }
@@ -200,6 +327,8 @@ class SignInController extends Notifier<SignInState> {
       ref.invalidate(profileDataProvider);
     } on ApiException catch (error) {
       state = state.copyWith(running: false, error: error.message);
+    } catch (error) {
+      state = state.copyWith(running: false, error: '$error（签到需要 NAS 后端下发）');
     }
   }
 }

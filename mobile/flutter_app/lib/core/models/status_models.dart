@@ -96,6 +96,37 @@ class SiteCarePolicy {
       );
 }
 
+/// 等级路线上的一个节点（养老进度分层展示用）。
+class LevelStep {
+  const LevelStep({
+    required this.name,
+    required this.requirement,
+    required this.achieved,
+    this.remaining = '',
+  });
+
+  final String name;
+  final String requirement;
+  final bool achieved;
+
+  /// 未达成时「还差什么」；已达成时为空。
+  final String remaining;
+
+  Map<String, dynamic> toJson() => <String, dynamic>{
+        'name': name,
+        'requirement': requirement,
+        'achieved': achieved,
+        'remaining': remaining,
+      };
+
+  factory LevelStep.fromJson(Map<String, dynamic> json) => LevelStep(
+        name: json['name']?.toString() ?? '',
+        requirement: json['requirement']?.toString() ?? '',
+        achieved: json['achieved'] as bool? ?? false,
+        remaining: json['remaining']?.toString() ?? '',
+      );
+}
+
 /// 站点数据刷新状态（站点页四态筛选的唯一口径）。
 ///
 /// 判定由后端给出（参考 seedstats 的「数据过期 + 零做种」告警口径），App 只渲染：
@@ -156,6 +187,7 @@ class SiteStats {
     this.joinDate,
     this.ratioOverride,
     this.signedInToday = false,
+    this.signInKnown = true,
     this.consecutiveSignInDays = 0,
     this.careState = CareState.unknown,
     this.careProgress = 0,
@@ -168,6 +200,8 @@ class SiteStats {
     this.todayBaselineAvailable = false,
     this.nextClass = '',
     this.nextClassRequirement = '',
+    this.levelSteps = const <LevelStep>[],
+    this.promotionNote = '',
     this.contractMet,
     this.contractNote = '',
   });
@@ -207,6 +241,12 @@ class SiteStats {
   /// 站点直接给出的分享率；缺省时由上传/下载计算。
   final double? ratioOverride;
   final bool signedInToday;
+
+  /// 签到状态是否真的采集到了。
+  ///
+  /// 直连模式只读站点用户页，不解析签到页，因此签到状态是「未采集」——
+  /// 这时不能显示「未签到」（那是另一种含义：采集到了并且没签）。
+  final bool signInKnown;
   final int consecutiveSignInDays;
   final CareState careState;
 
@@ -230,6 +270,12 @@ class SiteStats {
   /// 等级路线：下一等级与达成条件。
   final String nextClass;
   final String nextClassRequirement;
+
+  /// 完整等级路线（含每个等级的门槛与是否达成），供养老进度分层展示。
+  final List<LevelStep> levelSteps;
+
+  /// 等级规则口径说明（例如「按 NexusPHP 默认规则估算」）。
+  final String promotionNote;
 
   /// 保种契约（H&R / 契约检查）是否达成；null 表示后端未提供该项。
   final bool? contractMet;
@@ -259,7 +305,11 @@ class SiteStats {
   double? get ratio =>
       ratioOverride ?? (downloadedBytes > 0 ? uploadedBytes / downloadedBytes : null);
 
-  String get ratioLabel => ratio == null ? '—' : ratio!.toStringAsFixed(2);
+  String get ratioLabel {
+    if (ratio == null) return '—';
+    if (ratio!.isInfinite) return '∞';
+    return ratio!.toStringAsFixed(2);
+  }
 
   /// 站点图标回退用的首字（中文取第一个字，英文取首字母大写）。
   String get iconLetter {
@@ -273,9 +323,19 @@ class SiteStats {
 
   String get hrLabel => hrCount > 0 ? '$hrCount 项' : '无';
 
-  /// 签到情况：今日已签 + 连续天数。
-  String get signInLabel =>
-      signedInToday ? (consecutiveSignInDays > 0 ? '已签 · 连续 $consecutiveSignInDays 天' : '已签') : '未签';
+  /// 签到情况：今日已签 + 连续天数；未采集时明确写「未采集」。
+  String get signInLabel {
+    if (!signInKnown) return '未采集';
+    if (!signedInToday) return '未签';
+    return consecutiveSignInDays > 0 ? '已签 · 连续 $consecutiveSignInDays 天' : '已签';
+  }
+
+  /// 签到状态一句话（页面卡片用，避免把「未采集」渲染成「未签到」）。
+  String get signInStatusLabel {
+    if (!signInKnown) return '签到状态未采集';
+    if (!signedInToday) return '今日未签到';
+    return consecutiveSignInDays > 0 ? '今日已签到（连续 $consecutiveSignInDays 天）' : '今日已签到';
+  }
 
   Map<String, dynamic> toJson() => <String, dynamic>{
         'siteId': siteId,
@@ -296,6 +356,7 @@ class SiteStats {
         'joinDate': joinDate?.toIso8601String(),
         'ratioOverride': ratioOverride,
         'signedInToday': signedInToday,
+        'signInKnown': signInKnown,
         'consecutiveSignInDays': consecutiveSignInDays,
         'careState': careState.name,
         'careProgress': careProgress,
@@ -308,6 +369,8 @@ class SiteStats {
         'todayBaselineAvailable': todayBaselineAvailable,
         'nextClass': nextClass,
         'nextClassRequirement': nextClassRequirement,
+        'levelSteps': levelSteps.map((LevelStep s) => s.toJson()).toList(growable: false),
+        'promotionNote': promotionNote,
         'contractMet': contractMet,
         'contractNote': contractNote,
       };
@@ -332,6 +395,7 @@ class SiteStats {
         joinDate: _date(json['joinDate'] ?? json['registeredAt']),
         ratioOverride: (json['ratio'] as num?)?.toDouble(),
         signedInToday: json['signedInToday'] as bool? ?? false,
+        signInKnown: json['signInKnown'] as bool? ?? true,
         consecutiveSignInDays: _int(json['consecutiveSignInDays']),
         careState: CareState.fromName(json['careState']?.toString()),
         careProgress: (json['careProgress'] as num?)?.toDouble() ?? 0,
@@ -349,6 +413,11 @@ class SiteStats {
         todayBaselineAvailable: json['todayBaselineAvailable'] as bool? ?? false,
         nextClass: json['nextClass']?.toString() ?? '',
         nextClassRequirement: json['nextClassRequirement']?.toString() ?? '',
+        levelSteps: (json['levelSteps'] as List<dynamic>? ?? const <dynamic>[])
+            .whereType<Map<String, dynamic>>()
+            .map(LevelStep.fromJson)
+            .toList(growable: false),
+        promotionNote: json['promotionNote']?.toString() ?? '',
         contractMet: json['contractMet'] as bool?,
         contractNote: json['contractNote']?.toString() ?? '',
       );
@@ -411,7 +480,12 @@ class PtDataSnapshot {
   double? get overallRatio =>
       totalDownloaded > 0 ? totalUploaded / totalDownloaded : null;
 
-  int get signedInCount => sites.where((SiteStats s) => s.signedInToday).length;
+  /// 已确认「今日已签到」的站点数（未采集签到的站点不计入）。
+  int get signedInCount =>
+      sites.where((SiteStats s) => s.signInKnown && s.signedInToday).length;
+
+  /// 真的采集到签到状态的站点数；为 0 时界面显示「未采集」。
+  int get signInKnownCount => sites.where((SiteStats s) => s.signInKnown).length;
 
   factory PtDataSnapshot.fromJson(Map<String, dynamic> json) {
     final Object? rawSites = json['sites'] ?? json['items'];
