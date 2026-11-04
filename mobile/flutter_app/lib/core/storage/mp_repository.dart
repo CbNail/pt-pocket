@@ -10,7 +10,8 @@ class MpRepository {
   final PrefsStore prefs;
   final SecureStore secure;
 
-  static const int storageVersion = 1;
+  /// 存储结构版本：2 起实例带内网 / 外网双地址（1 为单一地址）。
+  static const int storageVersion = 2;
 
   List<MpInstance> loadAll() {
     final Map<String, dynamic>? raw = prefs.getJson(PrefKeys.mpIndex);

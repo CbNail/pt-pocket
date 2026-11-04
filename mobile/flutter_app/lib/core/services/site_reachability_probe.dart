@@ -1,6 +1,7 @@
 import 'package:dio/dio.dart';
 
 import '../config/app_config.dart';
+import '../network/url_utils.dart';
 
 /// 连接测试结果分类。
 enum SiteProbeOutcome {
@@ -57,14 +58,8 @@ class SiteReachabilityProbe {
     return probe(uri, timeout ?? AppConfig.siteProbeTimeout);
   }
 
-  /// 宽松解析站点地址：缺协议时补 `https://`。
-  static Uri? parseSiteUri(String raw) {
-    final String value = raw.trim();
-    if (value.isEmpty) return null;
-    final Uri? uri = Uri.tryParse(value.contains('://') ? value : 'https://$value');
-    if (uri == null || uri.host.isEmpty) return null;
-    return uri;
-  }
+  /// 宽松解析站点地址：缺协议时内网主机补 http、公网主机补 https，并保留端口与子路径。
+  static Uri? parseSiteUri(String raw) => UrlUtils.normalize(raw);
 
   static SiteProbeFn _httpProbe(Dio dio) => (Uri baseUrl, Duration timeout) async {
         final Stopwatch watch = Stopwatch()..start();
@@ -96,15 +91,24 @@ class SiteReachabilityProbe {
             outcome: SiteProbeOutcome.unreachable,
             statusCode: error.response?.statusCode,
             latencyMs: watch.elapsedMilliseconds,
-            message: switch (error.type) {
-              DioExceptionType.connectionTimeout ||
-              DioExceptionType.sendTimeout ||
-              DioExceptionType.receiveTimeout =>
-                '连接超时，请检查地址或当前网络',
-              DioExceptionType.badCertificate => '证书校验失败，已拒绝该连接',
-              _ => '无法连接该站点，请确认地址正确且网络可达',
-            },
+            message: describeFailure(baseUrl, error),
           );
         }
       };
+
+  /// 把网络层失败翻译成可定位的原因：带上目标地址、失败类型与原始信息。
+  static String describeFailure(Uri target, DioException error) {
+    switch (error.type) {
+      case DioExceptionType.connectionTimeout ||
+            DioExceptionType.sendTimeout ||
+            DioExceptionType.receiveTimeout:
+        return '连接超时：$target 在超时内没有响应（端口未开放、被防火墙拦截，或当前不在同一网络）';
+      case DioExceptionType.badCertificate:
+        return '证书校验失败：$target 使用的证书不受信任；内网请改用 http，公网请换受信任证书';
+      case DioExceptionType.connectionError:
+        return '无法建立连接：$target 域名解析失败或端口未开放（${error.message ?? ''}）';
+      default:
+        return '无法连接：$target（${error.message ?? error.type.name}）';
+    }
+  }
 }

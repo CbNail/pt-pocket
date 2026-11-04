@@ -8,6 +8,7 @@ import 'package:pointycastle/block/modes/cbc.dart';
 import 'package:pointycastle/digests/md5.dart';
 
 import '../config/app_config.dart';
+import '../network/url_utils.dart';
 
 /// CookieCloud 导入相关异常。
 class CookieCloudException implements Exception {
@@ -211,43 +212,146 @@ abstract final class CookieCloudCrypto {
       bytes.map((int b) => b.toRadixString(16).padLeft(2, '0')).join();
 }
 
+/// 一次性拉取结果：密文 + 实际生效的请求地址。
+///
+/// 带上请求地址，排障时能一眼看出到底打到了哪个 URL（反代子路径 / 协议猜错都看得出来）。
+class CookieCloudFetch {
+  const CookieCloudFetch({required this.encrypted, required this.uri});
+
+  final String encrypted;
+  final Uri uri;
+}
+
+/// 拉取 + 解密结果。
+class CookieCloudImport {
+  const CookieCloudImport({required this.bundle, required this.uri});
+
+  final CookieCloudBundle bundle;
+
+  /// 实际生效的请求地址。
+  final Uri uri;
+}
+
 /// CookieCloud 服务：拉取密文并在本机解密（端到端加密，口令不经服务端）。
 class CookieCloudService {
   CookieCloudService({Dio? dio}) : _dio = dio ?? Dio();
 
   final Dio _dio;
 
-  /// 构造 `GET {host}/get/{uuid}` 目标地址。
-  static Uri buildGetUri(String host, String uuid) {
-    final String base = host.trim().replaceAll(RegExp(r'/+$'), '');
-    final Uri? uri = Uri.tryParse('$base/get/${uuid.trim()}');
-    if (uri == null || uri.host.isEmpty) {
-      throw const CookieCloudException('CookieCloud 服务器地址格式不正确');
+  /// 候选请求地址（按尝试顺序）。
+  ///
+  /// 官方接口是 `GET {基址}/get/{uuid}`；这里额外覆盖两类常见部署差异：
+  /// - 用户没写协议：内网主机补 http、公网主机补 https，另一种协议再兜一次；
+  /// - 反代改写过路径：官方也支持 `GET {基址}/get?uuid={uuid}`。
+  ///
+  /// 基址里已有的反代子路径与端口都会保留（例如 `https://h:5888/cc`）。
+  static List<Uri> buildGetUriCandidates(String host, String uuid) {
+    final String raw = host.trim();
+    if (raw.isEmpty) {
+      throw const CookieCloudException('请填写 CookieCloud 服务器地址');
     }
-    return uri;
-  }
-
-  /// 拉取服务端保存的密文。
-  Future<String> fetchEncrypted({required String host, required String uuid}) async {
-    if (uuid.trim().isEmpty) {
+    final Uri? base = UrlUtils.normalize(raw);
+    if (base == null) {
+      throw CookieCloudException('CookieCloud 服务器地址格式不正确：$raw');
+    }
+    final String id = uuid.trim();
+    if (id.isEmpty) {
       throw const CookieCloudException('UUID 不能为空');
     }
-    final Uri uri = buildGetUri(host, uuid);
-    try {
-      final Response<dynamic> response = await _dio.getUri<dynamic>(
-        uri,
-        options: Options(
-          sendTimeout: AppConfig.importTimeout,
-          receiveTimeout: AppConfig.importTimeout,
-        ),
-      );
-      final Object? data = response.data;
-      if (data is Map && data['encrypted'] is String) {
-        return data['encrypted'] as String;
+
+    final List<Uri> candidates = <Uri>[UrlUtils.joinPath(base, '/get/$id')];
+    if (!raw.contains('://')) {
+      final Uri alternate = base.replace(scheme: base.scheme == 'https' ? 'http' : 'https');
+      candidates.add(UrlUtils.joinPath(alternate, '/get/$id'));
+    }
+    candidates.add(
+      UrlUtils.joinPath(base, '/get').replace(queryParameters: <String, String>{'uuid': id}),
+    );
+    return candidates;
+  }
+
+  /// 兼容旧调用：取第一个候选地址。
+  static Uri buildGetUri(String host, String uuid) => buildGetUriCandidates(host, uuid).first;
+
+  /// 依次尝试候选地址拉取密文；全部失败时把所有尝试结果汇总成一条可定位的错误。
+  Future<CookieCloudFetch> fetch({required String host, required String uuid}) async {
+    final List<Uri> candidates = buildGetUriCandidates(host, uuid);
+    final List<String> failures = <String>[];
+
+    for (final Uri uri in candidates) {
+      try {
+        final Response<dynamic> response = await _dio.getUri<dynamic>(
+          uri,
+          options: Options(
+            sendTimeout: AppConfig.importTimeout,
+            receiveTimeout: AppConfig.importTimeout,
+            // 按纯文本取回再自行判断：服务端可能直接返回密文，
+            // 或返回非 JSON 的错误页；交给 Dio 解析会变成难懂的解析异常。
+            responseType: ResponseType.plain,
+            validateStatus: (int? status) => status != null,
+          ),
+        );
+        final int status = response.statusCode ?? 0;
+        if (status < 200 || status >= 300) {
+          failures.add('$uri → HTTP $status');
+          continue;
+        }
+        final String? encrypted = extractEncrypted(response.data);
+        if (encrypted == null) {
+          failures.add('$uri → 响应中没有 encrypted 字段');
+          continue;
+        }
+        return CookieCloudFetch(encrypted: encrypted, uri: uri);
+      } on DioException catch (error) {
+        failures.add('$uri → ${describeDioFailure(error)}');
       }
-      throw const CookieCloudException('服务器未返回 encrypted 字段，请确认 UUID 是否正确');
-    } on DioException catch (error) {
-      throw CookieCloudException('拉取 CookieCloud 数据失败：${error.message ?? error.type.name}');
+    }
+
+    throw CookieCloudException(
+      '拉取 CookieCloud 数据失败：${failures.join('；')}',
+    );
+  }
+
+  /// 拉取密文（兼容旧签名）。
+  Future<String> fetchEncrypted({required String host, required String uuid}) async =>
+      (await fetch(host: host, uuid: uuid)).encrypted;
+
+  /// 从响应里取出密文：兼容 `{encrypted: "..."}`、被转义成字符串的 JSON、以及直接返回密文的部署。
+  static String? extractEncrypted(Object? data) {
+    if (data is Map) {
+      final Object? value = data['encrypted'] ?? data['data'] ?? data['cookie_data'];
+      if (value is String && value.trim().isNotEmpty) return value.trim();
+      return null;
+    }
+    if (data is String) {
+      final String text = data.trim();
+      if (text.isEmpty) return null;
+      // 响应可能是 JSON 文本，也可能是被再包一层引号的 JSON 字符串。
+      if (text.startsWith('{') || text.startsWith('[') || text.startsWith('"')) {
+        try {
+          return extractEncrypted(jsonDecode(text));
+        } on FormatException {
+          return null;
+        }
+      }
+      return text;
+    }
+    return null;
+  }
+
+  /// 把网络层失败翻译成可定位的原因（带地址与失败类型）。
+  static String describeDioFailure(DioException error) {
+    switch (error.type) {
+      case DioExceptionType.connectionTimeout ||
+            DioExceptionType.sendTimeout ||
+            DioExceptionType.receiveTimeout:
+        return '连接超时（地址不可达或端口未开放）';
+      case DioExceptionType.badCertificate:
+        return 'TLS 证书不受信任';
+      case DioExceptionType.connectionError:
+        return '无法建立连接（域名解析失败或端口未开放）';
+      default:
+        return error.message ?? error.type.name;
     }
   }
 
@@ -262,7 +366,12 @@ class CookieCloudService {
       password: password,
       encrypted: encrypted,
     );
-    final Object? decoded = jsonDecode(plain);
+    final Object? decoded;
+    try {
+      decoded = jsonDecode(plain);
+    } on FormatException catch (error) {
+      throw CookieCloudException('解密成功但内容不是合法 JSON：${error.message}');
+    }
     if (decoded is! Map<String, dynamic>) {
       throw const CookieCloudException('解密结果不是预期的 JSON 对象');
     }
@@ -270,12 +379,16 @@ class CookieCloudService {
   }
 
   /// 拉取 + 解密。
-  Future<CookieCloudBundle> fetchAndImport({
+  Future<CookieCloudImport> fetchAndImport({
     required String host,
     required String uuid,
     required String password,
   }) async {
-    final String encrypted = await fetchEncrypted(host: host, uuid: uuid);
-    return decryptBundle(uuid: uuid, password: password, encrypted: encrypted);
+    final CookieCloudFetch fetched = await fetch(host: host, uuid: uuid);
+    return CookieCloudImport(
+      bundle: decryptBundle(uuid: uuid, password: password, encrypted: fetched.encrypted),
+      uri: fetched.uri,
+    );
   }
 }
+

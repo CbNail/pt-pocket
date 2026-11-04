@@ -39,6 +39,9 @@ class _DownloaderAddPageState extends ConsumerState<DownloaderAddPage> {
   bool _saving = false;
   bool _prefilled = false;
 
+  /// 本页对应的下载器 id：首次保存时生成并复用，避免「测试一次就多建一条」。
+  String? _pendingId;
+
   bool get _isEditing => widget.downloaderId != null;
 
   @override
@@ -76,12 +79,19 @@ class _DownloaderAddPageState extends ConsumerState<DownloaderAddPage> {
     }
   }
 
+  void _snack(String message) {
+    ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(message)));
+  }
+
+  /// 测试连接：只探测地址可达性；测试后自动保存当前填写内容（无论测试成功或失败）。
   Future<void> _testConnection() async {
     final String url = _url.text.trim();
     if (url.isEmpty) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('请先填写下载器地址')),
-      );
+      _snack('请先填写下载器地址');
+      return;
+    }
+    if (!(_formKey.currentState?.validate() ?? false)) {
+      _snack('名称与地址填好后测试，测试成功与否都会自动保存');
       return;
     }
     setState(() {
@@ -94,13 +104,17 @@ class _DownloaderAddPageState extends ConsumerState<DownloaderAddPage> {
       _probing = false;
       _probeResult = result;
     });
+
+    final DownloaderConfig saved = await _persist();
+    await ref.read(downloaderListProvider.notifier).recordProbe(saved.id, result.isSuccess);
+    if (!mounted) return;
+    _snack('已自动保存下载器 · 连接测试：${result.outcome.label}');
   }
 
-  Future<void> _save() async {
-    if (!(_formKey.currentState?.validate() ?? false)) return;
-
+  /// 落盘当前表单内容（新增或更新同一条），供「测试后自动保存」与「保存下载器」共用。
+  Future<DownloaderConfig> _persist() async {
     final Uri? uri = SiteReachabilityProbe.parseSiteUri(_url.text);
-    final String id = widget.downloaderId ?? const Uuid().v4();
+    final String id = widget.downloaderId ?? (_pendingId ??= const Uuid().v4());
     final String username = _username.text.trim();
     final String password = _password.text;
 
@@ -114,8 +128,7 @@ class _DownloaderAddPageState extends ConsumerState<DownloaderAddPage> {
 
     final List<DownloaderConfig> existingList =
         ref.read(downloaderListProvider).valueOrNull ?? const <DownloaderConfig>[];
-    DownloaderConfig existing =
-        DownloaderConfig(id: id, name: '', kind: _kind, baseUrl: '');
+    DownloaderConfig existing = DownloaderConfig(id: id, name: '', kind: _kind, baseUrl: '');
     for (final DownloaderConfig candidate in existingList) {
       if (candidate.id == id) {
         existing = candidate;
@@ -133,17 +146,21 @@ class _DownloaderAddPageState extends ConsumerState<DownloaderAddPage> {
       credentialConfigured: credential != null || existing.credentialConfigured,
     );
 
-    setState(() => _saving = true);
     final DownloaderListNotifier notifier = ref.read(downloaderListProvider.notifier);
     await notifier.upsert(config);
     if (credential != null) {
       await notifier.saveCredential(id, credential);
     }
+    return config;
+  }
+
+  Future<void> _save() async {
+    if (!(_formKey.currentState?.validate() ?? false)) return;
+    setState(() => _saving = true);
+    final DownloaderConfig config = await _persist();
     if (!mounted) return;
     setState(() => _saving = false);
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(content: Text(_isEditing ? '已更新「${config.name}」' : '已添加下载器「${config.name}」')),
-    );
+    _snack(_isEditing ? '已更新「${config.name}」' : '已添加下载器「${config.name}」');
     _leave();
   }
 
@@ -251,7 +268,7 @@ class _DownloaderAddPageState extends ConsumerState<DownloaderAddPage> {
             const SizedBox(height: AppSpacing.lg),
             SectionCard(
               title: '连接测试',
-              subtitle: '只探测地址可达性，不校验账号有效性与引擎版本',
+              subtitle: '只探测地址可达性，不校验账号有效性与引擎版本；测试后自动保存本页内容',
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: <Widget>[

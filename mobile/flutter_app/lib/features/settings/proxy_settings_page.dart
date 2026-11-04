@@ -1,3 +1,4 @@
+import 'package:dio/dio.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
@@ -33,6 +34,14 @@ class _ProxySettingsPageState extends ConsumerState<ProxySettingsPage> {
   bool _useAuth = false;
   bool _hasPassword = false;
   bool _saving = false;
+  bool _testing = false;
+  String? _testMessage;
+
+  /// 代理连通性样本：两个公网 HTTPS 地址，取第一个能通的说明代理可用。
+  static final List<Uri> _probeTargets = <Uri>[
+    Uri.parse('https://api.github.com/'),
+    Uri.parse('https://www.baidu.com/'),
+  ];
 
   @override
   void initState() {
@@ -69,14 +78,20 @@ class _ProxySettingsPageState extends ConsumerState<ProxySettingsPage> {
     ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(message)));
   }
 
-  Future<void> _save() async {
+  bool _validate() {
     final String host = _host.text.trim();
     final int? port = int.tryParse(_port.text.trim());
     if (_enabled && (host.isEmpty || port == null || port <= 0 || port > 65535)) {
       _snack('请填写完整的代理地址与端口（1-65535）');
-      return;
+      return false;
     }
+    return true;
+  }
 
+  /// 落盘当前表单内容，供「保存代理设置」与「测试代理前自动保存」共用。
+  Future<void> _persist() async {
+    final String host = _host.text.trim();
+    final int? port = int.tryParse(_port.text.trim());
     final String password = _password.text;
     final ProxySettings settings = ProxySettings(
       enabled: _enabled,
@@ -85,22 +100,67 @@ class _ProxySettingsPageState extends ConsumerState<ProxySettingsPage> {
       useAuth: _useAuth,
       username: _username.text.trim(),
     );
-
-    setState(() => _saving = true);
     await ref
         .read(proxySettingsProvider.notifier)
         .save(settings, password: password.isEmpty ? null : password);
     await ref
         .read(proxyRuntimeProvider)
         .update(settings, password: password.isEmpty ? null : password);
-
     if (!mounted) return;
     setState(() {
-      _saving = false;
       _password.clear();
       if (password.isNotEmpty) _hasPassword = true;
     });
+  }
+
+  Future<void> _save() async {
+    if (!_validate()) return;
+    setState(() => _saving = true);
+    await _persist();
+    if (!mounted) return;
+    setState(() => _saving = false);
     _snack('代理设置已保存并立即生效');
+  }
+
+  /// 测试代理：先自动保存当前填写内容，再用该配置发一次真实请求。
+  ///
+  /// 无论测试成功或失败，配置都已落盘——不必再点一次「保存代理设置」。
+  Future<void> _testProxy() async {
+    if (!_validate()) return;
+    setState(() {
+      _testing = true;
+      _testMessage = null;
+    });
+    await _persist();
+    if (!mounted) return;
+    final String message = await _probeThroughProxy();
+    if (!mounted) return;
+    setState(() {
+      _testing = false;
+      _testMessage = message;
+    });
+    _snack('已自动保存代理设置 · $message');
+  }
+
+  Future<String> _probeThroughProxy() async {
+    final Dio dio = ref.read(proxyRuntimeProvider).createDio(
+          connectTimeout: const Duration(seconds: 6),
+          receiveTimeout: const Duration(seconds: 8),
+        );
+    final List<String> failures = <String>[];
+    for (final Uri target in _probeTargets) {
+      try {
+        final Response<dynamic> response = await dio.getUri<dynamic>(
+          target,
+          options: Options(validateStatus: (int? status) => status != null),
+        );
+        final String via = _enabled ? '经代理' : '代理未启用，本次为直连';
+        return '连通：${target.host} 返回 HTTP ${response.statusCode}（$via）';
+      } on DioException catch (error) {
+        failures.add('${target.host}（${error.type.name}）');
+      }
+    }
+    return '不可达：${failures.join('、')}';
   }
 
   @override
@@ -197,6 +257,25 @@ class _ProxySettingsPageState extends ConsumerState<ProxySettingsPage> {
                   '密码只保存在本机安全存储，不写入普通配置，也不会提交给服务端。',
                   style: theme.textTheme.bodySmall,
                 ),
+              ],
+            ),
+          ),
+          const SizedBox(height: AppSpacing.lg),
+          SectionCard(
+            title: '连通性检测',
+            subtitle: '用当前配置发一次真实请求；测试后自动保存已填内容',
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: <Widget>[
+                FilledButton.tonalIcon(
+                  onPressed: _testing ? null : _testProxy,
+                  icon: const Icon(Icons.network_check, size: AppSizes.iconSm),
+                  label: Text(_testing ? '测试中…' : '测试代理'),
+                ),
+                if (_testMessage != null) ...<Widget>[
+                  const SizedBox(height: AppSpacing.sm),
+                  Text(_testMessage!, style: theme.textTheme.bodySmall),
+                ],
               ],
             ),
           ),

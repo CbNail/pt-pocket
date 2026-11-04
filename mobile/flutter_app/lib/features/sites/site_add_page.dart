@@ -37,6 +37,9 @@ class _SiteAddPageState extends ConsumerState<SiteAddPage> {
   bool _probing = false;
   bool _saving = false;
 
+  /// 本页对应的站点 id：首次保存时生成并复用，避免「测试一次就多建一条」。
+  String? _pendingSiteId;
+
   @override
   void dispose() {
     _name.dispose();
@@ -60,12 +63,19 @@ class _SiteAddPageState extends ConsumerState<SiteAddPage> {
     });
   }
 
+  void _snack(String message) {
+    ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(message)));
+  }
+
+  /// 测试连接：只探测地址可达性；测试后自动保存当前填写内容（无论测试成功或失败）。
   Future<void> _testConnection() async {
     final String url = _url.text.trim();
     if (url.isEmpty) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('请先填写站点地址')),
-      );
+      _snack('请先填写站点地址');
+      return;
+    }
+    if (!(_formKey.currentState?.validate() ?? false)) {
+      _snack('站点名称与地址填好后测试，测试成功与否都会自动保存');
       return;
     }
     setState(() {
@@ -78,12 +88,14 @@ class _SiteAddPageState extends ConsumerState<SiteAddPage> {
       _probing = false;
       _probeResult = result;
     });
+    await _persist();
+    if (!mounted) return;
+    _snack('已自动保存站点 · 连接测试：${result.outcome.label}');
   }
 
-  Future<void> _save() async {
-    if (!(_formKey.currentState?.validate() ?? false)) return;
-    setState(() => _saving = true);
-
+  /// 落盘当前表单内容（新增或更新同一条），供「测试后自动保存」与「保存站点」共用。
+  Future<PtSite> _persist() async {
+    final String id = _pendingSiteId ??= const Uuid().v4();
     final Map<String, dynamic>? credential = buildCredentialMap(
       _authType,
       cookie: _cookie.text,
@@ -91,7 +103,6 @@ class _SiteAddPageState extends ConsumerState<SiteAddPage> {
       username: _username.text,
       password: _password.text,
     );
-    final String id = const Uuid().v4();
     final PtSite site = PtSite(
       id: id,
       name: _name.text.trim(),
@@ -108,11 +119,16 @@ class _SiteAddPageState extends ConsumerState<SiteAddPage> {
     if (credential != null) {
       await notifier.saveCredential(id, credential);
     }
+    return site;
+  }
+
+  Future<void> _save() async {
+    if (!(_formKey.currentState?.validate() ?? false)) return;
+    setState(() => _saving = true);
+    final PtSite site = await _persist();
     if (!mounted) return;
     setState(() => _saving = false);
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(content: Text('已添加站点「${site.name}」')),
-    );
+    _snack('已添加站点「${site.name}」');
     _leave();
   }
 
@@ -235,7 +251,7 @@ class _SiteAddPageState extends ConsumerState<SiteAddPage> {
             const SizedBox(height: AppSpacing.lg),
             SectionCard(
               title: '连接测试',
-              subtitle: '只探测站点地址可达性，不校验凭据有效性',
+              subtitle: '只探测站点地址可达性，不校验凭据有效性；测试后自动保存本页内容',
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: <Widget>[

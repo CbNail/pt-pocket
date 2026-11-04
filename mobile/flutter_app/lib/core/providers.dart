@@ -10,6 +10,7 @@ import 'network/endpoint_resolver.dart';
 import 'network/interceptors.dart';
 import 'network/link_supervisor.dart';
 import 'network/proxy_runtime.dart';
+import 'network/url_utils.dart';
 import 'storage/app_keys.dart';
 import 'storage/config_inheritance.dart';
 import 'storage/prefs_store.dart';
@@ -57,12 +58,11 @@ class EndpointProfileNotifier extends Notifier<EndpointProfile> {
     );
   }
 
-  /// 宽松解析：允许用户只填 `192.168.1.10:8000`，自动补 http 协议。
-  static Uri? parseBaseUrl(String? raw) {
-    if (raw == null || raw.trim().isEmpty) return null;
-    final String value = raw.trim();
-    return Uri.tryParse(value.contains('://') ? value : 'http://$value');
-  }
+  /// 宽松解析：允许用户只填 `192.168.1.10:8000` 或 `https://x.xyz:5888/ptp`。
+  ///
+  /// 归一化统一交给 [UrlUtils.normalize]：内网主机补 http、公网主机补 https，
+  /// 保留显式端口与反代子路径，并去掉 query / fragment / 末尾斜杠。
+  static Uri? parseBaseUrl(String? raw) => UrlUtils.normalize(raw);
 
   Future<void> update({
     Uri? lan,

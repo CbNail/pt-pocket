@@ -1,8 +1,14 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <!-- 网络权限：访问 NAS 后端、站点、下载器、CookieCloud 等自建服务必需。
+         注意：debug / profile 清单里也有 INTERNET，但 release 包只合并 main 清单，
+         缺了这条权限时 release 包会出现“Failed host lookup”“不可达”等假故障。 -->
+    <uses-permission android:name="android.permission.INTERNET"/>
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE"/>
     <application
         android:label="pt_pocket"
         android:name="${applicationName}"
-        android:icon="@mipmap/ic_launcher">
+        android:icon="@mipmap/ic_launcher"
+        android:usesCleartextTraffic="true">
         <activity
             android:name=".MainActivity"
             android:exported="true"

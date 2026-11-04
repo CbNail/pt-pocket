@@ -3,8 +3,12 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 
 import '../../core/models/pt_site.dart';
+import '../../core/providers.dart';
 import '../../core/router/app_routes.dart';
 import '../../core/services/cookiecloud_service.dart';
+import '../../core/storage/app_keys.dart';
+import '../../core/storage/prefs_store.dart';
+import '../../core/storage/secure_store.dart';
 import '../../core/theme/app_colors.dart';
 import '../../core/theme/design_tokens.dart';
 import '../../shared/widgets/section_card.dart';
@@ -34,12 +38,41 @@ class _CookieCloudImportPageState extends ConsumerState<CookieCloudImportPage> {
   String? _error;
   CookieCloudBundle? _bundle;
 
+  /// 实际生效的请求地址（排障用：能看出协议猜错还是反代路径不对）。
+  String? _usedUri;
+
+  @override
+  void initState() {
+    super.initState();
+    // 上次填过的地址 / UUID / 密码自动回填，不用每次重敲。
+    final PrefsStore prefs = ref.read(prefsStoreProvider);
+    _host.text = prefs.getString(PrefKeys.cookieCloudHost) ?? '';
+    _uuid.text = prefs.getString(PrefKeys.cookieCloudUuid) ?? '';
+    ref.read(secureStoreProvider).read(SecureKeys.cookieCloudKey).then((String? value) {
+      if (!mounted || value == null || value.isEmpty) return;
+      setState(() => _password.text = value);
+    });
+  }
+
   @override
   void dispose() {
     _host.dispose();
     _uuid.dispose();
     _password.dispose();
     super.dispose();
+  }
+
+  /// 落盘本次填写的参数：无论拉取成功还是失败都保存（需求：测试后自动保存）。
+  Future<void> _persistInput() async {
+    final PrefsStore prefs = ref.read(prefsStoreProvider);
+    await prefs.setString(PrefKeys.cookieCloudHost, _host.text.trim());
+    await prefs.setString(PrefKeys.cookieCloudUuid, _uuid.text.trim());
+    final SecureStore secure = ref.read(secureStoreProvider);
+    if (_password.text.isEmpty) {
+      await secure.delete(SecureKeys.cookieCloudKey);
+    } else {
+      await secure.write(SecureKeys.cookieCloudKey, _password.text);
+    }
   }
 
   void _leave() {
@@ -62,23 +95,28 @@ class _CookieCloudImportPageState extends ConsumerState<CookieCloudImportPage> {
       _loading = true;
       _error = null;
       _bundle = null;
+      _usedUri = null;
     });
+
+    CookieCloudImport? imported;
+    String? failure;
     try {
-      final CookieCloudBundle bundle = await ref
+      imported = await ref
           .read(cookieCloudServiceProvider)
           .fetchAndImport(host: host, uuid: uuid, password: password);
-      if (!mounted) return;
-      setState(() {
-        _loading = false;
-        _bundle = bundle;
-      });
     } on CookieCloudException catch (error) {
-      if (!mounted) return;
-      setState(() {
-        _loading = false;
-        _error = error.message;
-      });
+      failure = error.message;
     }
+
+    // 不管成功还是失败，填过的地址 / UUID / 密码都自动保存。
+    await _persistInput();
+    if (!mounted) return;
+    setState(() {
+      _loading = false;
+      _bundle = imported?.bundle;
+      _usedUri = imported?.uri.toString();
+      _error = failure;
+    });
   }
 
   Future<void> _applyToSite(PtSite site) async {
@@ -148,7 +186,10 @@ class _CookieCloudImportPageState extends ConsumerState<CookieCloudImportPage> {
                   keyboardType: TextInputType.url,
                   decoration: const InputDecoration(
                     labelText: '服务器地址',
-                    hintText: 'http://192.168.1.10:8088',
+                    hintText: 'http://192.168.1.10:8088 或 https://cc.example.com:8900/cc',
+                    helperText: '不写协议时：内网地址按 http、公网地址按 https 尝试，另一种协议会自动兜一次；'
+                        '反代子路径与端口会原样保留',
+                    helperMaxLines: 3,
                   ),
                 ),
                 const SizedBox(height: AppSpacing.md),
@@ -174,9 +215,14 @@ class _CookieCloudImportPageState extends ConsumerState<CookieCloudImportPage> {
                     ),
                   ],
                 ),
+                if (_usedUri != null) ...<Widget>[
+                  const SizedBox(height: AppSpacing.sm),
+                  Text('已从 $_usedUri 拉取', style: theme.textTheme.bodySmall),
+                ],
                 if (_error != null) ...<Widget>[
                   const SizedBox(height: AppSpacing.md),
                   Row(
+                    crossAxisAlignment: CrossAxisAlignment.start,
                     children: <Widget>[
                       const Icon(Icons.error_outline, size: AppSizes.iconSm, color: AppColors.danger),
                       const SizedBox(width: AppSpacing.sm),

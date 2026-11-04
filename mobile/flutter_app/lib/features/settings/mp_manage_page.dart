@@ -5,8 +5,8 @@ import 'package:go_router/go_router.dart';
 import '../../core/adapters/moviepilot_adapter_registry.dart';
 import '../../core/models/moviepilot.dart';
 import '../../core/models/service_health.dart';
+import '../../core/network/endpoint_resolver.dart';
 import '../../core/router/app_routes.dart';
-import '../../core/services/site_reachability_probe.dart';
 import '../../core/theme/app_colors.dart';
 import '../../core/theme/design_tokens.dart';
 import '../../shared/widgets/section_card.dart';
@@ -25,6 +25,9 @@ class MpManagePage extends ConsumerStatefulWidget {
 class _MpManagePageState extends ConsumerState<MpManagePage> {
   String? _testingId;
 
+  /// 最近一次测试命中的通道（内网 / 外网），用于在卡片上标出当前生效链路。
+  final Map<String, ActiveLink> _activeLinks = <String, ActiveLink>{};
+
   void _leave() {
     if (context.canPop()) {
       context.pop();
@@ -33,14 +36,37 @@ class _MpManagePageState extends ConsumerState<MpManagePage> {
     }
   }
 
+  /// 测试连接：走实例自己的双通道选路（内网优先、失败回退外网），并记录生效链路。
   Future<void> _test(MpInstance instance) async {
     setState(() => _testingId = instance.id);
-    final SiteProbeResult result = await ref.read(mpProbeProvider)(instance.baseUrl);
-    await ref.read(mpListProvider.notifier).recordProbe(instance.id, result.isSuccess);
+    final EndpointResolver resolver = ref.read(mpEndpointResolverProvider(instance.id));
+    resolver.invalidate();
+
+    ResolvedEndpoint? endpoint;
+    try {
+      endpoint = await resolver.resolve(force: true);
+    } on EndpointUnavailableException {
+      endpoint = null;
+    }
+
+    await ref.read(mpListProvider.notifier).recordProbe(instance.id, endpoint != null);
     if (!mounted) return;
-    setState(() => _testingId = null);
+    setState(() {
+      _testingId = null;
+      if (endpoint == null) {
+        _activeLinks.remove(instance.id);
+      } else {
+        _activeLinks[instance.id] = endpoint.link;
+      }
+    });
     ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(content: Text('${instance.name}：${result.outcome.label} · ${result.message}')),
+      SnackBar(
+        content: Text(
+          endpoint == null
+              ? '${instance.name}：两条通道均不可用 · ${instance.addressSummary}'
+              : '${instance.name}：${endpoint.link.label}通道可用 · ${endpoint.baseUrl}',
+        ),
+      ),
     );
   }
 
@@ -145,7 +171,13 @@ class _MpManagePageState extends ConsumerState<MpManagePage> {
                                 children: <Widget>[
                                   Text(instance.name, style: theme.textTheme.titleSmall),
                                   const SizedBox(height: AppSpacing.xxs),
-                                  Text(instance.host, style: theme.textTheme.bodySmall),
+                                  Text(instance.addressSummary, style: theme.textTheme.bodySmall),
+                                  if (_activeLinks[instance.id] != null)
+                                    Text(
+                                      '当前生效：${_activeLinks[instance.id]!.label}通道 · '
+                                      '${instance.addressFor(_activeLinks[instance.id]!)}',
+                                      style: theme.textTheme.bodySmall,
+                                    ),
                                 ],
                               ),
                             ),
@@ -194,6 +226,10 @@ class _MpManagePageState extends ConsumerState<MpManagePage> {
                               compact: true,
                             ),
                             StatusBadge(label: instance.version.label, tone: StatusTone.info, compact: true),
+                            if (instance.hasLan && instance.hasWan)
+                              const StatusBadge(label: '内网+外网', tone: StatusTone.info, compact: true),
+                            if (!instance.hasAnyAddress)
+                              const StatusBadge(label: '未配地址', tone: StatusTone.danger, compact: true),
                             StatusBadge(
                               label: instance.credentialConfigured ? '令牌已录入' : '待录令牌',
                               tone: instance.credentialConfigured

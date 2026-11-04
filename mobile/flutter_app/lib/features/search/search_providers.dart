@@ -46,6 +46,40 @@ final Provider<MpReachabilityProbe> mpProbeProvider = Provider<MpReachabilityPro
   (Ref ref) => MpReachabilityProbe(dio: ref.watch(proxyRuntimeProvider).createDio()),
 );
 
+/// 单个 MoviePilot 实例的双通道选路器：内网优先（2 秒）、失败回退外网（10 秒），
+/// 成功结果缓存 5 分钟，网络变化或探测失败时失效重选——与 NAS 服务地址同一套策略。
+final ProviderFamily<EndpointResolver, String> mpEndpointResolverProvider =
+    Provider.family<EndpointResolver, String>((Ref ref, String instanceId) {
+  final MpInstance? instance = ref.watch(mpByIdProvider(instanceId));
+  final MpReachabilityProbe probe = ref.watch(mpProbeProvider);
+  final EndpointResolver resolver = EndpointResolver(
+    // MP 没有 /api/v1/health，可用性以「能否拿到站点响应」为准（401/403 也算连通）。
+    probe: (Uri candidate, Duration timeout) async {
+      final SiteProbeResult result = await probe(candidate.toString(), timeout: timeout);
+      return result.isSuccess;
+    },
+    profile: EndpointProfile(
+      lanBaseUrl: instance?.lanUri,
+      wanBaseUrl: instance?.wanUri,
+    ),
+  );
+  // 网络环境变化时立即失效，保证回到家庭网络后下一次请求自动切回内网。
+  ref.listen(connectivityProvider, (_, _) => resolver.invalidate());
+  return resolver;
+});
+
+/// 某个 MP 实例当前实际生效的地址与链路（无可用通道时为 null）。
+final FutureProviderFamily<ResolvedEndpoint?, String> mpActiveEndpointProvider =
+    FutureProvider.family<ResolvedEndpoint?, String>((Ref ref, String instanceId) async {
+  final MpInstance? instance = ref.watch(mpByIdProvider(instanceId));
+  if (instance == null || !instance.hasAnyAddress) return null;
+  try {
+    return await ref.watch(mpEndpointResolverProvider(instanceId)).resolve();
+  } on EndpointUnavailableException {
+    return null;
+  }
+});
+
 /// MoviePilot 实例清单。
 final AsyncNotifierProvider<MpListNotifier, List<MpInstance>> mpListProvider =
     AsyncNotifierProvider<MpListNotifier, List<MpInstance>>(MpListNotifier.new);

@@ -71,7 +71,8 @@ class _NotifyPageState extends ConsumerState<NotifyPage> {
     ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(message)));
   }
 
-  Future<void> _save() async {
+  /// 落盘当前表单内容，供「保存推送设置」与「发送测试消息前自动保存」共用。
+  Future<void> _persist() async {
     final String webhook = _wecomWebhook.text.trim();
     final String token = _telegramToken.text.trim();
     final NotifySettings settings = NotifySettings(
@@ -84,7 +85,6 @@ class _NotifyPageState extends ConsumerState<NotifyPage> {
       notifyOnTaskDone: _notifyOnTaskDone,
     );
 
-    setState(() => _saving = true);
     await ref.read(notifySettingsProvider.notifier).save(
           settings,
           wecomWebhook: webhook.isEmpty ? null : webhook,
@@ -92,24 +92,34 @@ class _NotifyPageState extends ConsumerState<NotifyPage> {
         );
     if (!mounted) return;
     setState(() {
-      _saving = false;
+      // 凭据已落安全存储，输入框清空避免重复提交。
       _wecomWebhook.clear();
       _telegramToken.clear();
     });
+  }
+
+  Future<void> _save() async {
+    setState(() => _saving = true);
+    await _persist();
+    if (!mounted) return;
+    setState(() => _saving = false);
     _snack('推送设置已保存');
   }
 
+  /// 发送测试消息：先自动保存当前设置（无论测试成败，配置都不丢）。
   Future<void> _test(NotifyChannel channel) async {
     setState(() => _testing = channel);
+    await _persist();
+    if (!mounted) return;
     try {
       await ref.read(notifyApiProvider).sendTest(channel);
       if (!mounted) return;
       setState(() => _testing = null);
-      _snack('已请求服务端向${channel.label}发送测试消息');
+      _snack('设置已自动保存，并请求服务端向${channel.label}发送测试消息');
     } catch (error) {
       if (!mounted) return;
       setState(() => _testing = null);
-      _snack('测试推送失败：$error');
+      _snack('设置已自动保存；测试推送失败：$error');
     }
   }
 

@@ -34,6 +34,10 @@ abstract final class PrefKeys {
   // 12 大站点槽位（需求 11：清单由用户配置）
   static const String majorSites = 'major.sites';
 
+  // CookieCloud 导入参数（地址与 UUID 非敏感；端到端密码在 SecureStore）
+  static const String cookieCloudHost = 'cookiecloud.host';
+  static const String cookieCloudUuid = 'cookiecloud.uuid';
+
   // 推送通道设置与自动补签
   static const String notifySettings = 'notify.settings';
   static const String signInAutoEnabled = 'signin.auto.enabled';

@@ -86,7 +86,10 @@
         └─ 缓存 5 分钟；网络变化 / 请求失败 / 手动测试 → 立即失效重选
 ```
 
-- 可用性以 **`GET /api/v1/health` 返回 2xx** 为准，而不是 TCP 可连接；
+- 可用性以 **`GET {基址}/api/v1/health` 返回 2xx 且响应为 JSON（或空体）** 为准，而不是 TCP 可连接；
+  基址带反代子路径时必须拼接而不是 `Uri.resolve`（后者会丢掉子路径）；地址可达但后端未就绪
+  （拿到 HTTP 却非本服务的健康响应）会单独标注，不笼统显示“不可用”；
+- MoviePilot 实例复用同一套双通道策略（每个实例可有内网 / 外网两条地址）；
 - `LinkSupervisor` 监听系统网络变化并周期性复检，**回到家网自动切回内网**；
 - `ProxyManager` 把 App 代理设置套用到各业务 Dio：仅支持 **HTTP 代理**
   （dart:io 的代理指令只解析 `DIRECT` 与 `PROXY host:port`，不支持 SOCKS5），
@@ -94,8 +97,8 @@
 
 ## 6. 配置继承与迁移（需求 17）
 
-- 每次配置结构变更：`AppConfig.configSchemaVersion` +1，并在
-  `ConfigInheritanceService` 注册一条**只做补充/改名/结构升级**的迁移；
+- 每次配置结构变更：`AppConfig.configSchemaVersion` +1（当前为 **4**：MoviePilot 由单一地址升级为内外网双地址），
+  并在 `ConfigInheritanceService` 注册一条**只做补充/改名/结构升级**的迁移；
 - 迁移**绝不删除或覆盖用户已填写的值**；过程幂等，可安全重复执行；
 - 启动顺序：读偏好 → 跑迁移 → 记录 App 版本；
 - 已有测试覆盖：全新安装补默认值、旧版本升级保留用户值、重复启动幂等、

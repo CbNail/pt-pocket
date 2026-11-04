@@ -1,4 +1,5 @@
 import '../config/app_config.dart';
+import '../network/url_utils.dart';
 import 'prefs_store.dart';
 import 'secure_store.dart';
 
@@ -122,6 +123,54 @@ class ConfigInheritanceService {
         }
         if (!prefs.contains('search.pageSize')) {
           await prefs.setInt('search.pageSize', 50);
+        }
+      },
+    ),
+    // v3 -> v4：MoviePilot 实例由单一地址升级为内网 / 外网双地址。
+    // 只做「结构升级 + 补键」：把旧地址按内网/公网归到对应通道，绝不丢弃用户填过的地址。
+    ConfigMigration(
+      id: '3_to_4_moviepilot_dual_endpoint',
+      toVersion: 4,
+      run: (PrefsStore prefs, SecureStore secure) async {
+        final Map<String, dynamic>? index = prefs.getJson('moviepilot.index');
+        if (index == null) return;
+        final Object? rawList = index['instances'];
+        if (rawList is! List) return;
+
+        bool changed = false;
+        final List<Map<String, dynamic>> migrated = <Map<String, dynamic>>[];
+        for (final Object? item in rawList) {
+          if (item is! Map) continue;
+          final Map<String, dynamic> instance = Map<String, dynamic>.from(item);
+          final String legacy = instance['baseUrl'] as String? ?? '';
+          final String lan = instance['lanBaseUrl'] as String? ?? '';
+          final String wan = instance['wanBaseUrl'] as String? ?? '';
+          if (lan.isEmpty && wan.isEmpty && legacy.isNotEmpty) {
+            final Uri? uri = UrlUtils.normalize(legacy);
+            if (uri != null) {
+              final bool isLan = UrlUtils.isPrivateHost(uri.host);
+              instance['lanBaseUrl'] = isLan ? uri.toString() : '';
+              instance['wanBaseUrl'] = isLan ? '' : uri.toString();
+              changed = true;
+            }
+          } else {
+            if (!instance.containsKey('lanBaseUrl')) {
+              instance['lanBaseUrl'] = lan;
+              changed = true;
+            }
+            if (!instance.containsKey('wanBaseUrl')) {
+              instance['wanBaseUrl'] = wan;
+              changed = true;
+            }
+          }
+          migrated.add(instance);
+        }
+
+        if (changed) {
+          await prefs.setJson('moviepilot.index', <String, dynamic>{
+            if (index['version'] != null) 'version': 2,
+            'instances': migrated,
+          });
         }
       },
     ),

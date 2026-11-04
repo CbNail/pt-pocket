@@ -1,3 +1,7 @@
+import 'dart:io' show File;
+import 'dart:typed_data';
+
+import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
@@ -30,6 +34,10 @@ class _PtdImportPageState extends ConsumerState<PtdImportPage> {
   bool _importing = false;
   int? _importedCount;
 
+  /// 已选中的备份文件名（zip 或 json）。
+  String? _fileName;
+  String? _error;
+
   @override
   void dispose() {
     _text.dispose();
@@ -48,7 +56,48 @@ class _PtdImportPageState extends ConsumerState<PtdImportPage> {
     setState(() {
       _result = ref.read(ptdImporterProvider).parse(_text.text);
       _importedCount = null;
+      _fileName = null;
+      _error = null;
     });
+  }
+
+  /// 选择 PTD 插件导出的备份文件（zip 优先，也兼容单个 json）。
+  ///
+  /// App 自行识别 zip 内的成员，不需要用户手动指定该用哪个文件。
+  Future<void> _pickFile() async {
+    try {
+      final FilePickerResult? picked = await FilePicker.pickFiles(
+        dialogTitle: '选择 PTD 备份',
+        type: FileType.custom,
+        allowedExtensions: <String>['zip', 'json'],
+        withData: true,
+      );
+      if (picked == null || picked.files.isEmpty) return;
+
+      final PlatformFile file = picked.files.first;
+      Uint8List? bytes = file.bytes;
+      final String? path = file.path;
+      if (bytes == null && path != null) {
+        bytes = await File(path).readAsBytes();
+      }
+      if (bytes == null) {
+        if (!mounted) return;
+        setState(() => _error = '读取不到所选文件的内容，请换一个文件重试');
+        return;
+      }
+
+      final PtdImportResult result = ref.read(ptdImporterProvider).parseBytes(bytes);
+      if (!mounted) return;
+      setState(() {
+        _result = result;
+        _fileName = file.name;
+        _importedCount = null;
+        _error = null;
+      });
+    } catch (error) {
+      if (!mounted) return;
+      setState(() => _error = '选择文件失败：$error');
+    }
   }
 
   Future<void> _importAll() async {
@@ -144,9 +193,38 @@ class _PtdImportPageState extends ConsumerState<PtdImportPage> {
         children: <Widget>[
           SectionCard(
             title: '备份内容',
-            subtitle: '粘贴 PTD / PT-depiler 导出的 JSON 备份文本',
+            subtitle: '直接选 PTD / PT-depiler 导出的 zip 备份，App 自行挑出其中要用的成员；也可粘贴单个 JSON',
             child: Column(
               children: <Widget>[
+                Row(
+                  children: <Widget>[
+                    FilledButton.icon(
+                      onPressed: _importing ? null : _pickFile,
+                      icon: const Icon(Icons.folder_open, size: AppSizes.iconSm),
+                      label: const Text('选择备份文件'),
+                    ),
+                    const SizedBox(width: AppSpacing.md),
+                    if (_fileName != null)
+                      Expanded(
+                        child: Text(
+                          _fileName!,
+                          style: theme.textTheme.bodySmall,
+                          overflow: TextOverflow.ellipsis,
+                        ),
+                      ),
+                  ],
+                ),
+                if (_error != null) ...<Widget>[
+                  const SizedBox(height: AppSpacing.sm),
+                  Row(
+                    children: <Widget>[
+                      const Icon(Icons.error_outline, size: AppSizes.iconSm, color: AppColors.danger),
+                      const SizedBox(width: AppSpacing.sm),
+                      Expanded(child: Text(_error!, style: theme.textTheme.bodySmall)),
+                    ],
+                  ),
+                ],
+                const SizedBox(height: AppSpacing.md),
                 TextField(
                   controller: _text,
                   minLines: 6,
@@ -176,6 +254,41 @@ class _PtdImportPageState extends ConsumerState<PtdImportPage> {
               ],
             ),
           ),
+          if (result != null && result.members.isNotEmpty) ...<Widget>[
+            const SizedBox(height: AppSpacing.lg),
+            SectionCard(
+              title: '备份成员处理情况',
+              subtitle:
+                  '共 ${result.members.length} 个成员：采用 ${result.usedMembers.length} 个、忽略 ${result.ignoredMembers.length} 个',
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: <Widget>[
+                  for (final PtdMemberSummary member in result.members)
+                    Padding(
+                      padding: const EdgeInsets.symmetric(vertical: AppSpacing.xxs),
+                      child: Row(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: <Widget>[
+                          Expanded(
+                            child: Text(
+                              member.name,
+                              style: theme.textTheme.bodySmall,
+                              overflow: TextOverflow.ellipsis,
+                            ),
+                          ),
+                          const SizedBox(width: AppSpacing.sm),
+                          StatusBadge(
+                            label: member.label,
+                            tone: member.used ? StatusTone.ok : StatusTone.neutral,
+                            compact: true,
+                          ),
+                        ],
+                      ),
+                    ),
+                ],
+              ),
+            ),
+          ],
           if (result != null) ...<Widget>[
             const SizedBox(height: AppSpacing.lg),
             SectionCard(
@@ -208,6 +321,11 @@ class _PtdImportPageState extends ConsumerState<PtdImportPage> {
                                 Text(entry.name, style: theme.textTheme.bodyMedium),
                                 if (entry.baseUrl != null)
                                   Text(entry.baseUrl!, style: theme.textTheme.bodySmall),
+                                if (entry.sources.isNotEmpty)
+                                  Text(
+                                    '来自：${entry.sources.join('、')}',
+                                    style: theme.textTheme.bodySmall,
+                                  ),
                                 if (entry.notes.isNotEmpty)
                                   Text(
                                     entry.notes.join('；'),

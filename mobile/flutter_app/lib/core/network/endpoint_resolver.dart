@@ -1,6 +1,7 @@
 import 'package:dio/dio.dart';
 
 import '../config/app_config.dart';
+import 'url_utils.dart';
 
 /// 链路模式：自动（LAN 优先，失败回退 WAN）/ 强制内网 / 强制外网。
 enum LinkMode {
@@ -175,7 +176,43 @@ class EndpointUnavailableException implements Exception {
   String toString() => profile.isConfigured ? '内网与外网地址均不可用' : '尚未配置 NAS 服务地址';
 }
 
-/// 默认健康探测实现：GET /api/v1/health，2xx 视为可用。
+/// 健康探测结果：把「地址能不能连上」与「后端是否就绪」分开表达。
+///
+/// 自建服务常见这样的状态：反代本身可达（能返回 HTTP），但后端 `/api/v1/health`
+/// 还没部署或返回 404。旧实现把两者都显示成「不可用」，会让人误以为地址填错。
+class HealthProbeResult {
+  const HealthProbeResult({
+    required this.reachable,
+    required this.apiHealthy,
+    this.statusCode,
+    this.looksLikeApi = false,
+    this.message = '',
+    this.errorType,
+  });
+
+  /// 是否拿到了 HTTP 响应（含 4xx / 5xx，说明网络与地址本身没问题）。
+  final bool reachable;
+
+  /// `/api/v1/health` 是否返回 2xx；链路选路以此为准。
+  final bool apiHealthy;
+
+  final int? statusCode;
+
+  /// 2xx 且响应体是 JSON，用于排除「反代到了别的服务」这种假健康。
+  final bool looksLikeApi;
+
+  final String message;
+
+  /// `timeout` / `dns` / `tls` / `cancel` / `other`，供界面与日志归因。
+  final String? errorType;
+
+  bool get isUsable => apiHealthy;
+
+  /// 地址通、但后端未就绪。
+  bool get reachableButNotReady => reachable && !apiHealthy;
+}
+
+/// 默认健康探测实现：GET {基址}/api/v1/health。
 ///
 /// 独立于业务客户端，使用最小化 Dio 实例，避免依赖解析结果造成循环。
 class HttpHealthProbe {
@@ -184,21 +221,108 @@ class HttpHealthProbe {
   final Dio _dio;
   final String healthPath;
 
+  /// 选路用：只回答「这条链路当前能否真正干活」。
+  ///
+  /// 除 2xx 外还要求响应体是 JSON（或空体）：反代把请求转到了别的服务时
+  /// 常返回 200 + HTML，这种「假健康」不能拿来选路。
   Future<bool> call(Uri candidate, Duration timeout) async {
+    final HealthProbeResult result = await diagnose(candidate, timeout);
+    return result.apiHealthy && result.looksLikeApi;
+  }
+
+  /// 诊断用：区分网络不可达与后端未就绪，并给出可执行的提示。
+  Future<HealthProbeResult> diagnose(Uri candidate, Duration timeout) async {
+    // 用拼接而不是 Uri.resolve：反代挂在子路径时，基址路径必须保留。
+    final Uri target = UrlUtils.joinPath(candidate, healthPath);
     try {
-      final Uri target = candidate.resolve(healthPath);
       final Response<dynamic> response = await _dio.getUri<dynamic>(
         target,
         options: Options(
           sendTimeout: timeout,
           receiveTimeout: timeout,
           followRedirects: true,
-          validateStatus: (int? status) => status != null && status >= 200 && status < 300,
+          responseType: ResponseType.plain,
+          validateStatus: (int? status) => status != null,
         ),
       );
-      return response.statusCode != null && response.statusCode! >= 200 && response.statusCode! < 300;
-    } on DioException {
-      return false;
+      final int status = response.statusCode ?? 0;
+      final bool ok = status >= 200 && status < 300;
+      final bool json = _looksLikeApiBody(response.data);
+      return HealthProbeResult(
+        reachable: true,
+        apiHealthy: ok,
+        statusCode: status,
+        looksLikeApi: ok && json,
+        message: _reachableMessage(target: target, status: status, ok: ok, json: json),
+      );
+    } on DioException catch (error) {
+      final String type = _errorType(error);
+      return HealthProbeResult(
+        reachable: false,
+        apiHealthy: false,
+        message: _unreachableMessage(target: target, error: error, type: type),
+        errorType: type,
+      );
+    } catch (error) {
+      return HealthProbeResult(
+        reachable: false,
+        apiHealthy: false,
+        message: '探测失败：$error',
+        errorType: 'other',
+      );
+    }
+  }
+
+  /// 2xx 且响应体像本后端的健康响应：JSON 对象/数组，或干脆是空体。
+  static bool _looksLikeApiBody(Object? data) {
+    if (data == null) return true;
+    if (data is Map || data is List) return true;
+    if (data is String) {
+      final String text = data.trim();
+      if (text.isEmpty) return true;
+      return text.startsWith('{') || text.startsWith('[');
+    }
+    return false;
+  }
+
+  static String _errorType(DioException error) => switch (error.type) {
+        DioExceptionType.connectionTimeout ||
+        DioExceptionType.sendTimeout ||
+        DioExceptionType.receiveTimeout =>
+          'timeout',
+        DioExceptionType.badCertificate => 'tls',
+        DioExceptionType.connectionError => 'dns',
+        DioExceptionType.cancel => 'cancel',
+        _ => 'other',
+      };
+
+  static String _reachableMessage({
+    required Uri target,
+    required int status,
+    required bool ok,
+    required bool json,
+  }) {
+    if (ok && json) return '可达：$target 返回 HTTP $status（JSON 健康响应）';
+    if (ok) return '可达但存疑：$target 返回 HTTP $status，响应不是 JSON，可能反代到了其它服务';
+    return '地址可达、后端未就绪：$target 返回 HTTP $status';
+  }
+
+  static String _unreachableMessage({
+    required Uri target,
+    required DioException error,
+    required String type,
+  }) {
+    switch (type) {
+      case 'timeout':
+        return '连接超时：$target 在超时内没有响应，可能是端口未开放或被防火墙/运营商拦截';
+      case 'tls':
+        return 'TLS 证书不受信任：$target 证书校验失败，请换用受信任证书或改用 http 内网地址';
+      case 'dns':
+        return '无法建立连接：$target 域名解析失败或端口未开放（${error.message ?? ''}）';
+      case 'cancel':
+        return '探测被取消：$target';
+      default:
+        return '连接失败：$target（${error.message ?? error.type.name}）';
     }
   }
 }

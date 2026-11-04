@@ -4,6 +4,8 @@
 /// 移动端只提交搜索请求、展示归一化结果并下发推送参数。
 library;
 
+import '../network/endpoint_resolver.dart' show ActiveLink;
+import '../network/url_utils.dart';
 import 'service_health.dart';
 
 /// MoviePilot 适配版本。
@@ -25,11 +27,17 @@ enum MpVersion {
 }
 
 /// MoviePilot 实例配置（非机密；API 令牌在安全存储）。
+///
+/// 地址支持内网与外网两条通道（[lanBaseUrl] / [wanBaseUrl]），与 NAS 服务地址一致：
+/// 内网优先、失败回退外网，回到家庭网络后自动切回。
+/// [baseUrl] 仅作为兼容旧数据的“单一地址”字段保留。
 class MpInstance {
   const MpInstance({
     required this.id,
     required this.name,
-    required this.baseUrl,
+    this.baseUrl = '',
+    this.lanBaseUrl = '',
+    this.wanBaseUrl = '',
     this.version = MpVersion.v2,
     this.credentialConfigured = false,
     this.enabled = true,
@@ -42,7 +50,16 @@ class MpInstance {
 
   final String id;
   final String name;
+
+  /// 兼容字段：旧数据里的单一地址。
   final String baseUrl;
+
+  /// 内网地址（可空）。
+  final String lanBaseUrl;
+
+  /// 外网地址（可空，一般为 lucky 反代入口）。
+  final String wanBaseUrl;
+
   final MpVersion version;
   final bool credentialConfigured;
   final bool enabled;
@@ -54,12 +71,54 @@ class MpInstance {
   final DateTime? createdAt;
   final DateTime? updatedAt;
 
-  String get host => Uri.tryParse(baseUrl)?.host ?? baseUrl;
+  Uri? get lanUri => UrlUtils.normalize(lanBaseUrl);
+  Uri? get wanUri => UrlUtils.normalize(wanBaseUrl);
+
+  bool get hasLan => lanUri != null;
+  bool get hasWan => wanUri != null;
+
+  /// 是否至少配了一个可用地址（含旧数据里的单一地址）。
+  bool get hasAnyAddress => hasLan || hasWan || UrlUtils.normalize(baseUrl) != null;
+
+  /// 已配置地址，内网在前；旧数据只有单一地址时用该地址兜底。
+  List<String> get addresses => <String>[
+        if (hasLan) lanUri!.toString(),
+        if (hasWan) wanUri!.toString(),
+        if (!hasLan && !hasWan && UrlUtils.normalize(baseUrl) != null)
+          UrlUtils.normalize(baseUrl)!.toString(),
+      ];
+
+  /// 内网优先的展示地址。
+  String get displayAddress => addresses.isEmpty ? '' : addresses.first;
+
+  /// 双通道说明（用于界面展示与交给 NAS 后端）。
+  String get addressSummary {
+    final List<String> parts = <String>[
+      if (hasLan) '内网 ${lanUri!}',
+      if (hasWan) '外网 ${wanUri!}',
+      if (!hasLan && !hasWan) if (UrlUtils.normalize(baseUrl) != null) '${UrlUtils.normalize(baseUrl)!}',
+    ];
+    return parts.isEmpty ? '未配置地址' : parts.join(' · ');
+  }
+
+  String get host {
+    final Uri? uri = lanUri ?? wanUri ?? UrlUtils.normalize(baseUrl);
+    return uri?.host ?? baseUrl;
+  }
+
+  /// 按当前生效链路取地址；该通道未配置时退回内网优先的地址。
+  String addressFor(ActiveLink link) {
+    if (link == ActiveLink.lan && hasLan) return lanUri!.toString();
+    if (link == ActiveLink.wan && hasWan) return wanUri!.toString();
+    return displayAddress;
+  }
 
   MpInstance copyWith({
     String? id,
     String? name,
     String? baseUrl,
+    String? lanBaseUrl,
+    String? wanBaseUrl,
     MpVersion? version,
     bool? credentialConfigured,
     bool? enabled,
@@ -73,6 +132,8 @@ class MpInstance {
         id: id ?? this.id,
         name: name ?? this.name,
         baseUrl: baseUrl ?? this.baseUrl,
+        lanBaseUrl: lanBaseUrl ?? this.lanBaseUrl,
+        wanBaseUrl: wanBaseUrl ?? this.wanBaseUrl,
         version: version ?? this.version,
         credentialConfigured: credentialConfigured ?? this.credentialConfigured,
         enabled: enabled ?? this.enabled,
@@ -87,6 +148,8 @@ class MpInstance {
         'id': id,
         'name': name,
         'baseUrl': baseUrl,
+        'lanBaseUrl': lanBaseUrl,
+        'wanBaseUrl': wanBaseUrl,
         'version': version.name,
         'credentialConfigured': credentialConfigured,
         'enabled': enabled,
@@ -97,19 +160,35 @@ class MpInstance {
         'updatedAt': updatedAt?.toIso8601String(),
       };
 
-  factory MpInstance.fromJson(Map<String, dynamic> json) => MpInstance(
-        id: json['id'] as String? ?? '',
-        name: json['name'] as String? ?? '',
-        baseUrl: json['baseUrl'] as String? ?? '',
-        version: MpVersion.fromName(json['version'] as String?),
-        credentialConfigured: json['credentialConfigured'] as bool? ?? false,
-        enabled: json['enabled'] as bool? ?? true,
-        searchEnhance: json['searchEnhance'] as bool? ?? false,
-        health: ServiceHealth.fromName(json['health'] as String?),
-        lastTestedAt: _parseDate(json['lastTestedAt']),
-        createdAt: _parseDate(json['createdAt']),
-        updatedAt: _parseDate(json['updatedAt']),
-      );
+  /// 读取实例；旧数据（只有一个 `baseUrl`）按内网/公网自动归到对应通道，不丢用户填过的地址。
+  factory MpInstance.fromJson(Map<String, dynamic> json) {
+    final String legacy = json['baseUrl'] as String? ?? '';
+    String lan = json['lanBaseUrl'] as String? ?? '';
+    String wan = json['wanBaseUrl'] as String? ?? '';
+    if (lan.isEmpty && wan.isEmpty && legacy.isNotEmpty) {
+      final Uri? uri = UrlUtils.normalize(legacy);
+      if (uri != null && UrlUtils.isPrivateHost(uri.host)) {
+        lan = uri.toString();
+      } else {
+        wan = uri.toString();
+      }
+    }
+    return MpInstance(
+      id: json['id'] as String? ?? '',
+      name: json['name'] as String? ?? '',
+      baseUrl: legacy,
+      lanBaseUrl: lan,
+      wanBaseUrl: wan,
+      version: MpVersion.fromName(json['version'] as String?),
+      credentialConfigured: json['credentialConfigured'] as bool? ?? false,
+      enabled: json['enabled'] as bool? ?? true,
+      searchEnhance: json['searchEnhance'] as bool? ?? false,
+      health: ServiceHealth.fromName(json['health'] as String?),
+      lastTestedAt: _parseDate(json['lastTestedAt']),
+      createdAt: _parseDate(json['createdAt']),
+      updatedAt: _parseDate(json['updatedAt']),
+    );
+  }
 }
 
 /// 促销类型（站点侧标记，颜色之外必须有文字）。

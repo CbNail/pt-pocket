@@ -1,7 +1,10 @@
 // 配置继承 / 迁移测试（需求 #17）：升级迭代后 App 端已填配置自动继承、不被覆盖。
 
+import 'dart:convert';
+
 import 'package:flutter_test/flutter_test.dart';
 import 'package:pt_pocket/core/config/app_config.dart';
+import 'package:pt_pocket/core/models/moviepilot.dart';
 import 'package:pt_pocket/core/storage/config_inheritance.dart';
 import 'package:pt_pocket/core/storage/prefs_store.dart';
 import 'package:pt_pocket/core/storage/secure_store.dart';
@@ -50,7 +53,7 @@ void main() {
     expect(result.fromVersion, 1);
     expect(
       result.appliedMigrations,
-      <String>['1_to_2_dual_endpoint', '2_to_3_proxy_and_search'],
+      <String>['1_to_2_dual_endpoint', '2_to_3_proxy_and_search', '3_to_4_moviepilot_dual_endpoint'],
     );
 
     // 旧单一地址迁移到内网通道，并删除旧键。
@@ -71,5 +74,52 @@ void main() {
     expect(second.fromVersion, AppConfig.configSchemaVersion);
     expect(prefs.getString('theme.mode'), 'light');
     expect(prefs.getString('config.lastAppVersion'), '0.7.1');
+  });
+
+  test('v3 -> v4：MoviePilot 旧单一地址按内网/公网归入对应通道且不丢字段', () async {
+    SharedPreferences.setMockInitialValues(<String, Object>{
+      'ptp.config.schemaVersion': 3,
+      'ptp.moviepilot.index': jsonEncode(<String, dynamic>{
+        'version': 1,
+        'instances': <Map<String, dynamic>>[
+          <String, dynamic>{
+            'id': 'mp-lan',
+            'name': '本机 MP',
+            'baseUrl': 'http://192.168.1.10:3000',
+            'version': 'v2',
+          },
+          <String, dynamic>{
+            'id': 'mp-wan',
+            'name': '远程 MP',
+            'baseUrl': 'https://mp.example.com',
+            'version': 'v2',
+          },
+        ],
+      }),
+    });
+    final PrefsStore legacyPrefs = PrefsStore(await SharedPreferences.getInstance());
+    final ConfigInheritanceService legacy = ConfigInheritanceService(
+      prefs: legacyPrefs,
+      secure: SecureStore(),
+    );
+
+    final ConfigInheritanceResult result = await legacy.initialize(appVersion: '0.7.1');
+    expect(result.appliedMigrations, contains('3_to_4_moviepilot_dual_endpoint'));
+
+    final Map<String, dynamic>? index = legacyPrefs.getJson('moviepilot.index');
+    final List<dynamic> instances = index!['instances'] as List<dynamic>;
+    final Map<String, dynamic> lan = Map<String, dynamic>.from(instances[0] as Map);
+    final Map<String, dynamic> wan = Map<String, dynamic>.from(instances[1] as Map);
+
+    expect(lan['lanBaseUrl'], 'http://192.168.1.10:3000');
+    expect(lan['wanBaseUrl'], '');
+    expect(wan['wanBaseUrl'], 'https://mp.example.com');
+    expect(wan['lanBaseUrl'], '');
+    // 原有字段保留
+    expect(lan['name'], '本机 MP');
+    // 模型读出来仍然可用，且旧地址没有丢
+    final MpInstance model = MpInstance.fromJson(lan);
+    expect(model.lanUri.toString(), 'http://192.168.1.10:3000');
+    expect(model.hasAnyAddress, isTrue);
   });
 }
