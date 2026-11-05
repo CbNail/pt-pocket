@@ -16,13 +16,33 @@ NAS 后端实现并可用后，本地直连取不到的条目会自动回退到 
    不允许只推代码不推文档，也不允许只在本地改完而不推送。
 3. 规格书里区分「当前源码事实」与「目标产品要求」，验收以规格书为准，不以“代码里已经有”为准。
 
-- 规格基线：《PT Pocket 产品需求与 App 设计规格书 V1.6（硬件适配版 + 交互改造 + 直连数据源 + 站点模块修复与后端架构）》
+- 规格基线：《PT Pocket 产品需求与 App 设计规格书 V1.7（硬件适配版 + 交互改造 + 直连数据源 + 站点模块修复 + 凭据类型可选）》
 - 目标设备：HUAWEI Mate 70 Pro+（HarmonyOS 6.1.0）
 - 服务端宿主：威联通 TS-451D、自组设备（PVE）
 
-## 1. 本轮更新（V1.6：站点模块修复与 NAS 后端架构）
+## 1. 本轮更新（V1.7：站点凭据类型可选与默认项）
 
-### 1.1 「站点」模块 7 项修复
+### 1.1 凭据类型不再写死 Cookie
+
+站点分不同架构、不同站点规则，凭据类型不能只有 Cookie。现在的口径是**给默认项、也允许用户自行选择**：
+
+| 事项 | 现在的行为 |
+| --- | --- |
+| 默认认证方式 | 按站点架构给出推荐项并在下拉里标注「推荐」：NexusPHP → Cookie，BTiTracker → Cookie，Unit3D → API Key，Gazelle → API Key，自定义 → Cookie；用户随时可以改成该架构支持的任何一种 |
+| 新增站点架构 | 补齐 **BTiTracker**（BtiTracker / TBDev 系），与 NexusPHP / Unit3D / Gazelle / 自定义并列 |
+| 站点是否允许 Cookie 抓取 | 新增站点级开关「允许用 Cookie 抓取该站数据」，默认按域名规则给值：**M-Team 这类禁止以登录态抓取页面的站点默认关闭**，此时认证方式默认落到 API Key，Cookie 选项不再出现，并写明原因；其它站点默认允许，用户可自行改写 |
+| 编辑站点 | 「站点架构」「认证方式」不再是只读信息，可在编辑页直接改并立即落盘；把认证方式从 Cookie 改成 API Key 时会提示重新录入对应凭据 |
+| API Key 扩展字段 | API Key / 存取令牌类型支持可选的 **UID** 与 **Device ID**（M-Team 官方 API 需要），并在表单里说明用途 |
+| 直连数据源归因 | 直连页面解析只在「站点用 Cookie 认证 且 允许 Cookie 抓取」时成立：非 Cookie 认证报「认证方式不支持直连，该站数据需要 NAS 后端或对应 API 适配器」；禁止 Cookie 抓取报「站点禁止 Cookie 抓取」；**只有真的 Cookie 认证且没录凭据才提示缺 Cookie** |
+
+配套改动：`SiteFramework` 新增 `btitracker`；`SiteAdapterDescriptor` 新增推荐认证方式与推荐理由；
+新增 `SiteCookiePolicy`（Cookie 抓取域名策略）与 `PtSite.cookieAllowed`（缺省按域名推断，兼容旧数据）；
+`SiteAdapterRegistry.defaultAuthTypeFor()` 在关闭 Cookie 时优先落到官方接口凭据；
+`NexusPhpClient.requireDirectCookie()` 统一做直连门禁与失败归因；
+凭据表单与弹层支持 UID / Device ID。
+新增 `test/features/site_auth_type_test.dart`（14 个用例）覆盖默认项、可选集合、Cookie 策略、模型落盘与直连归因。
+
+### 1.2 上一轮（V1.6）：「站点」模块 7 项修复
 
 | 问题 | 现在的行为 |
 | --- | --- |
@@ -39,7 +59,7 @@ NAS 后端实现并可用后，本地直连取不到的条目会自动回退到 
 `NexusPhpClient.browse()`（站点资源数据源）、`AppRoutes.siteResourcesPath`、`formatDateTime()`；
 新增 `test/features/sites_round2_test.dart`（10 个用例）覆盖上述行为。
 
-### 1.2 NAS 后端架构（10 个模块）
+### 1.3 NAS 后端架构（10 个模块）
 
 一句话定位：**手机是遥控器，NAS 是一直开机工作的控制中心**——手机负责展示、交互与操作，
 后端负责真正执行任务、管理数据、连接外部服务；手机关机 / 没电 / 断网时，定时签到、数据采集与
@@ -70,13 +90,13 @@ NAS 后端实现并可用后，本地直连取不到的条目会自动回退到 
 多站聚合搜索，随后补定时任务与统计，最后扩展监护室、MP 与通知。App 内已有的直连数据源保留为
 **后端不可用时的降级通道**，不再作为后续功能的主实现路径。
 
-### 1.3 历史轮次（V1.5）摘要
+### 1.4 历史轮次（V1.5）摘要
 
 引入 App 直连数据源：监护室直连公开状态页；我的数据 / 养老进度直连站点用户页 + 本机每日采样 +
 内置等级路线；搜索逐站直连站内搜索页；下载器直连 qBittorrent WebUI；「连接与服务」内外网两个按钮
 合并为一个按色切换的按钮。详见规格书 §22。
 
-#### 1.3.1 历史轮次（V1.5）明细：根因与实现
+#### 1.4.1 历史轮次（V1.5）明细：根因与实现
 
 本轮解决的是**同一个根因**：`backend/` 尚未实现（见第 5 节），而监护室、我的数据、养老进度、
 站点统计、聚合搜索与下载器任务此前全部只走 NAS 接口 `/api/v1/*`，于是没有可用后端时它们一起失败，
@@ -120,7 +140,7 @@ NAS 后端实现并可用后，本地直连取不到的条目会自动回退到 
    （本轮新增 5 个测试文件覆盖监护室解析、NexusPHP 用户页与搜索解析、等级规则与本地历史、
    qBittorrent 直连、数据组装与下载器通道）。
 
-### 1.4 历史轮次（V1.4：交互改造、实时展示与模块对齐）
+### 1.5 历史轮次（V1.4：交互改造、实时展示与模块对齐）
 
 1. **地址录入统一**：所有 http/https 地址（连接与服务的服务地址、下载器、MoviePilot、CookieCloud）
    一律「协议点选 + 主机 + 端口 + 可选子路径」，主机与端口分开填、端口有默认值且可改；
@@ -156,7 +176,7 @@ NAS 后端实现并可用后，本地直连取不到的条目会自动回退到 
 10. **卡片内的列表项修复**：卡片容器（`SectionCard`）内垫一层透明 Material，
     避免卡片底色盖住开关 / 列表项的点击水波纹（调试模式下会直接抛断言）。
 
-#### 1.4.1 历史轮次（V1.2）摘要
+#### 1.5.1 历史轮次（V1.2）摘要
 
 1. **Android release 包网络权限**：`main/AndroidManifest.xml` 补 `INTERNET`、`ACCESS_NETWORK_STATE`
    与 `usesCleartextTraffic`。此前 release 包只合并 `main` 清单，缺权限导致所有出网请求失败，
@@ -225,6 +245,9 @@ flutter build apk    # 需安装 Android SDK + JDK 17
 - 站点的数据统计、刷新与监护事件**优先由 `lib/core/direct/` 直连**（监护室公开状态页、站点用户页、
   qBittorrent WebUI），NAS 后端可用时对本地取不到的站点回退后端；「今日增量」「综合时魔」「保种契约」
   这类可能缺数据的指标必须区分「0」与「未提供 / 基线不足」，不填 0 冒充；时魔为本地估算时必须标注；
+- 站点的认证方式：默认项由 `SiteAdapterRegistry.recommendedAuthType()` 给出（Unit3D / Gazelle 推荐 API Key），
+  表单里标注「推荐」但用户可以改；是否允许 Cookie 抓取由 `SiteCookiePolicy` 给默认值 + 站点级开关覆盖，
+  拿不准时以站点规则为准；新增架构时必须同时补 `SiteAdapterDescriptor`（含推荐认证方式与推荐理由）；
 - 站点模块结构：列表 `features/sites/sites_page.dart`（打码 / 详细概述 / 左滑 / 卡片菜单）、
   「站点资源」`features/sites/site_resources_page.dart`（账号数据 + 等级路线 + 站点资源列表）、
   编辑 `features/sites/site_detail_page.dart`（站点信息 / 连接测试 / 凭据 / 参与范围）；
@@ -248,6 +271,8 @@ flutter build apk    # 需安装 Android SDK + JDK 17
 - 站点访问、搜索并发、定时任务与通知统一在后端调度，移动端不直连数据库与 Redis。
 - PostgreSQL 与 Redis 的数据目录不放在 NFS 上。
 - 对外只暴露 `/api/v1` 版本化接口；错误码规范见规格书 §9.5。
+- 凭据与认证方式的差别（Cookie / Passkey / API Key / 账号）由站点配置驱动；后端适配器按
+  `auth_type` 选择对应取数方式，App 直连只覆盖 Cookie + 页面解析这一条路径，其余由后端承担。
 - 后端模块划分（10 个）：PT 站点管理、聚合搜索、自动任务中心、数据统计、下载器管理、MoviePilot 集成、
   PT 监护室、消息通知、数据与凭据中心、网络与任务调度；落到组件的映射见规格书 §7.3.1，摘要见 §1.2。
 - 实施顺序：后端通信 + 站点管理 / 凭据安全 → 首个站点适配 → 下载器管理 → 多站聚合搜索 →

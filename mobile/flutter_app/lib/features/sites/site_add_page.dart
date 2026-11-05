@@ -30,9 +30,18 @@ class _SiteAddPageState extends ConsumerState<SiteAddPage> {
   final TextEditingController _secret = TextEditingController();
   final TextEditingController _username = TextEditingController();
   final TextEditingController _password = TextEditingController();
+  final TextEditingController _uid = TextEditingController();
+  final TextEditingController _deviceId = TextEditingController();
 
   SiteFramework _framework = SiteFramework.nexusphp;
-  SiteAuthType _authType = SiteAuthType.cookie;
+
+  /// 用户是否手动改过认证方式（改过就不再被「按架构推荐」自动覆盖）。
+  bool _authTypeTouched = false;
+  SiteAuthType _authType =
+      SiteAdapterRegistry.defaultAuthTypeFor(SiteFramework.nexusphp);
+
+  /// 是否允许用 Cookie 抓取：默认按域名策略给值，用户可手动改写（null = 跟随策略）。
+  bool? _cookieAllowedOverride;
   SiteProbeResult? _probeResult;
   bool _probing = false;
   bool _saving = false;
@@ -48,19 +57,42 @@ class _SiteAddPageState extends ConsumerState<SiteAddPage> {
     _secret.dispose();
     _username.dispose();
     _password.dispose();
+    _uid.dispose();
+    _deviceId.dispose();
     super.dispose();
   }
+
+  /// 当前站点是否允许 Cookie 抓取（未手动改写时按域名策略推断）。
+  bool get _cookieAllowed =>
+      _cookieAllowedOverride ?? SiteCookiePolicy.allowsCookieByDefault(_host);
+
+  String get _host =>
+      SiteReachabilityProbe.parseSiteUri(_url.text)?.host ?? _url.text.trim();
 
   void _onFrameworkChanged(SiteFramework? framework) {
     if (framework == null) return;
     setState(() {
       _framework = framework;
-      final List<SiteAuthType> allowed = SiteAdapterRegistry.authTypesFor(framework);
-      if (!allowed.contains(_authType)) {
-        _authType = allowed.first;
-      }
       _probeResult = null;
+      _syncAuthType();
     });
+  }
+
+  void _onUrlChanged(String _) => setState(_syncAuthType);
+
+  /// 认证方式校正：可选集合随「架构 + 是否允许 Cookie」变化；
+  /// 用户没手动选过时，按架构推荐值（例如 Unit3D / Gazelle → API Key）。
+  void _syncAuthType() {
+    final List<SiteAuthType> allowed = SiteAdapterRegistry.authTypesFor(_framework)
+        .where((SiteAuthType t) => _cookieAllowed || t != SiteAuthType.cookie)
+        .toList(growable: false);
+    if (allowed.isEmpty) return;
+    if (!_authTypeTouched || !allowed.contains(_authType)) {
+      _authType = SiteAdapterRegistry.defaultAuthTypeFor(
+        _framework,
+        cookieAllowed: _cookieAllowed,
+      );
+    }
   }
 
   void _snack(String message) {
@@ -102,6 +134,8 @@ class _SiteAddPageState extends ConsumerState<SiteAddPage> {
       secret: _secret.text,
       username: _username.text,
       password: _password.text,
+      uid: _uid.text,
+      deviceId: _deviceId.text,
     );
     final PtSite site = PtSite(
       id: id,
@@ -109,6 +143,7 @@ class _SiteAddPageState extends ConsumerState<SiteAddPage> {
       baseUrl: SiteReachabilityProbe.parseSiteUri(_url.text)?.toString() ?? _url.text.trim(),
       framework: _framework,
       authType: _authType,
+      cookieAllowed: _cookieAllowed,
       credentialConfigured: credential != null,
       createdAt: DateTime.now(),
       updatedAt: DateTime.now(),
@@ -144,7 +179,9 @@ class _SiteAddPageState extends ConsumerState<SiteAddPage> {
   Widget build(BuildContext context) {
     final ThemeData theme = Theme.of(context);
     final SiteAdapterDescriptor descriptor = SiteAdapterRegistry.of(_framework);
-    final List<SiteAuthType> authTypes = SiteAdapterRegistry.authTypesFor(_framework);
+    final List<SiteAuthType> authTypes = SiteAdapterRegistry.authTypesFor(_framework)
+        .where((SiteAuthType t) => _cookieAllowed || t != SiteAuthType.cookie)
+        .toList(growable: false);
 
     return Scaffold(
       appBar: AppBar(
@@ -175,6 +212,7 @@ class _SiteAddPageState extends ConsumerState<SiteAddPage> {
                   TextFormField(
                     controller: _url,
                     keyboardType: TextInputType.url,
+                    onChanged: _onUrlChanged,
                     decoration: const InputDecoration(
                       labelText: '站点地址',
                       hintText: 'https://example.com',
@@ -203,6 +241,21 @@ class _SiteAddPageState extends ConsumerState<SiteAddPage> {
                     alignment: Alignment.centerLeft,
                     child: Text(descriptor.note, style: theme.textTheme.bodySmall),
                   ),
+                  const SizedBox(height: AppSpacing.xs),
+                  SwitchListTile(
+                    contentPadding: EdgeInsets.zero,
+                    value: _cookieAllowed,
+                    title: const Text('允许用 Cookie 抓取该站数据'),
+                    subtitle: Text(
+                      _cookieAllowed
+                          ? '按站点规则可维护登录态；解析页面数据时会带上该 Cookie'
+                          : SiteCookiePolicy.reason(_host),
+                    ),
+                    onChanged: (bool value) => setState(() {
+                      _cookieAllowedOverride = value;
+                      _syncAuthType();
+                    }),
+                  ),
                 ],
               ),
             ),
@@ -219,16 +272,35 @@ class _SiteAddPageState extends ConsumerState<SiteAddPage> {
                     items: authTypes
                         .map((SiteAuthType t) => DropdownMenuItem<SiteAuthType>(
                               value: t,
-                              child: Text(t.label),
+                              child: Text(
+                                t == descriptor.recommendedAuthType
+                                    ? '${t.label}（推荐）'
+                                    : t.label,
+                              ),
                             ))
                         .toList(growable: false),
                     onChanged: (SiteAuthType? value) {
                       if (value == null) return;
-                      setState(() => _authType = value);
+                      setState(() {
+                        _authType = value;
+                        _authTypeTouched = true;
+                      });
                     },
                   ),
                   const SizedBox(height: AppSpacing.xs),
+                  Text(
+                    descriptor.authRecommendationNote,
+                    style: theme.textTheme.bodySmall,
+                  ),
+                  const SizedBox(height: AppSpacing.xxs),
                   Text(_authType.description, style: theme.textTheme.bodySmall),
+                  if (!_cookieAllowed) ...<Widget>[
+                    const SizedBox(height: AppSpacing.xs),
+                    Text(
+                      SiteCookiePolicy.reason(_host),
+                      style: theme.textTheme.bodySmall?.copyWith(color: theme.colorScheme.error),
+                    ),
+                  ],
                   const SizedBox(height: AppSpacing.md),
                   CredentialFields(
                     authType: _authType,
@@ -236,6 +308,9 @@ class _SiteAddPageState extends ConsumerState<SiteAddPage> {
                     secretController: _secret,
                     usernameController: _username,
                     passwordController: _password,
+                    uidController: _uid,
+                    deviceIdController: _deviceId,
+                    showApiKeyExtras: true,
                   ),
                   if (_authType == SiteAuthType.account) ...<Widget>[
                     const SizedBox(height: AppSpacing.sm),

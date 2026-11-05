@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 
+import '../../core/adapters/site_adapter_registry.dart';
 import '../../core/models/pt_site.dart';
 import '../../core/router/app_routes.dart';
 import '../../core/services/site_reachability_probe.dart';
@@ -95,6 +96,64 @@ class _SiteDetailPageState extends ConsumerState<SiteDetailPage> {
     await ref.read(siteListProvider.notifier).clearCredential(site.id);
   }
 
+  /// 可选认证方式：随架构与「是否允许 Cookie 抓取」变化。
+  List<SiteAuthType> _authTypesFor(PtSite site) {
+    final List<SiteAuthType> allowed = SiteAdapterRegistry.authTypesFor(site.framework)
+        .where((SiteAuthType t) => site.cookieAllowed || t != SiteAuthType.cookie)
+        .toList(growable: false);
+    return allowed.isEmpty
+        ? SiteAdapterRegistry.authTypesFor(site.framework)
+        : allowed;
+  }
+
+  /// 修改站点架构 / 认证方式 / Cookie 抓取开关并立即落盘。
+  ///
+  /// 认证方式与凭据类型必须一致：切换认证方式后，原凭据可能不再匹配，
+  /// 因此这里明确提示重新录入，并且不再用「未保存 Cookie」这类笼统说法。
+  Future<void> _changeStructure(
+    PtSite site, {
+    SiteFramework? framework,
+    SiteAuthType? authType,
+    bool? cookieAllowed,
+  }) async {
+    final SiteFramework nextFramework = framework ?? site.framework;
+    bool nextCookieAllowed = cookieAllowed ?? site.cookieAllowed;
+    // 站点规则不允许 Cookie 时，不给「用 Cookie 抓取」留后门（用户可显式打开，但会被提示）。
+    final List<SiteAuthType> allowedForNext = SiteAdapterRegistry.authTypesFor(nextFramework)
+        .where((SiteAuthType t) => nextCookieAllowed || t != SiteAuthType.cookie)
+        .toList(growable: false);
+    SiteAuthType nextAuthType = authType ?? site.authType;
+    if (authType == null) {
+      // 不是用户直接改认证方式：仅在当前方式不再可用时，回落到该结构的推荐项。
+      if (!allowedForNext.contains(nextAuthType)) {
+        nextAuthType = SiteAdapterRegistry.defaultAuthTypeFor(
+          nextFramework,
+          cookieAllowed: nextCookieAllowed,
+        );
+      }
+    } else if (!allowedForNext.contains(nextAuthType)) {
+      _snack('该站已关闭 Cookie 抓取，Cookie 认证不可选');
+      nextAuthType = site.authType;
+      nextCookieAllowed = site.cookieAllowed;
+    }
+
+    await ref.read(siteListProvider.notifier).upsert(
+          site.copyWith(
+            framework: nextFramework,
+            authType: nextAuthType,
+            cookieAllowed: nextCookieAllowed,
+          ),
+        );
+    if (!mounted) return;
+    if (site.authType != nextAuthType) {
+      _snack('认证方式已改为「${nextAuthType.label}」，请重新录入该类型的凭据');
+    }
+  }
+
+  void _snack(String message) {
+    ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(message)));
+  }
+
   Future<void> _delete(PtSite site) async {
     final bool? confirmed = await showDialog<bool>(
       context: context,
@@ -162,8 +221,57 @@ class _SiteDetailPageState extends ConsumerState<SiteDetailPage> {
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: <Widget>[
-                _InfoRow(label: '适配定义', value: site.framework.label),
-                _InfoRow(label: '认证方式', value: site.authType.label),
+                DropdownButtonFormField<SiteFramework>(
+                  initialValue: site.framework,
+                  decoration: const InputDecoration(labelText: '站点架构（适配定义）'),
+                  items: SiteFramework.values
+                      .map((SiteFramework f) => DropdownMenuItem<SiteFramework>(
+                            value: f,
+                            child: Text(f.label),
+                          ))
+                      .toList(growable: false),
+                  onChanged: (SiteFramework? value) => _changeStructure(site, framework: value),
+                ),
+                const SizedBox(height: AppSpacing.xs),
+                Text(
+                  SiteAdapterRegistry.of(site.framework).note,
+                  style: theme.textTheme.bodySmall,
+                ),
+                const SizedBox(height: AppSpacing.md),
+                DropdownButtonFormField<SiteAuthType>(
+                  initialValue: site.authType,
+                  decoration: const InputDecoration(labelText: '认证方式'),
+                  items: _authTypesFor(site)
+                      .map((SiteAuthType t) => DropdownMenuItem<SiteAuthType>(
+                            value: t,
+                            child: Text(
+                              t == SiteAdapterRegistry.recommendedAuthType(site.framework)
+                                  ? '${t.label}（推荐）'
+                                  : t.label,
+                            ),
+                          ))
+                      .toList(growable: false),
+                  onChanged: (SiteAuthType? value) => _changeStructure(site, authType: value),
+                ),
+                const SizedBox(height: AppSpacing.xs),
+                Text(
+                  SiteAdapterRegistry.of(site.framework).authRecommendationNote,
+                  style: theme.textTheme.bodySmall,
+                ),
+                const SizedBox(height: AppSpacing.xxs),
+                Text(site.authType.description, style: theme.textTheme.bodySmall),
+                const SizedBox(height: AppSpacing.xs),
+                SwitchListTile(
+                  contentPadding: EdgeInsets.zero,
+                  value: site.cookieAllowed,
+                  title: const Text('允许用 Cookie 抓取该站数据'),
+                  subtitle: Text(
+                    site.cookieAllowed
+                        ? '解析页面数据时会带上该站 Cookie'
+                        : SiteCookiePolicy.reason(site.host),
+                  ),
+                  onChanged: (bool value) => _changeStructure(site, cookieAllowed: value),
+                ),
                 _InfoRow(
                   label: '最近测试',
                   value: site.lastTestedAt == null ? '未测试' : _formatTime(site.lastTestedAt!),
@@ -345,6 +453,10 @@ class _CredentialSheetState extends State<_CredentialSheet> {
       TextEditingController(text: widget.initial?['username']?.toString() ?? '');
   late final TextEditingController _password =
       TextEditingController(text: widget.initial?['password']?.toString() ?? '');
+  late final TextEditingController _uid =
+      TextEditingController(text: widget.initial?['uid']?.toString() ?? '');
+  late final TextEditingController _deviceId =
+      TextEditingController(text: widget.initial?['deviceId']?.toString() ?? '');
 
   @override
   void dispose() {
@@ -352,6 +464,8 @@ class _CredentialSheetState extends State<_CredentialSheet> {
     _secret.dispose();
     _username.dispose();
     _password.dispose();
+    _uid.dispose();
+    _deviceId.dispose();
     super.dispose();
   }
 
@@ -362,6 +476,8 @@ class _CredentialSheetState extends State<_CredentialSheet> {
       secret: _secret.text,
       username: _username.text,
       password: _password.text,
+      uid: _uid.text,
+      deviceId: _deviceId.text,
     );
     if (credential == null) {
       ScaffoldMessenger.of(context).showSnackBar(
@@ -397,6 +513,16 @@ class _CredentialSheetState extends State<_CredentialSheet> {
               secretController: _secret,
               usernameController: _username,
               passwordController: _password,
+              uidController: _uid,
+              deviceIdController: _deviceId,
+              showApiKeyExtras: widget.authType == SiteAuthType.apiKey,
+            ),
+            const SizedBox(height: AppSpacing.sm),
+            Text(
+              widget.authType == SiteAuthType.cookie
+                  ? 'Cookie 只保存在本机安全存储；如站点不允许以登录态抓取数据，请改用存取令牌。'
+                  : '仅用于官方接口请求；不会写入日志，也不会用于页面抓取。',
+              style: theme.textTheme.bodySmall,
             ),
             const SizedBox(height: AppSpacing.lg),
             Row(

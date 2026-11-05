@@ -12,6 +12,7 @@ enum SiteFramework {
   nexusphp('NexusPHP', '通用 NexusPHP 结构适配定义'),
   unit3d('Unit3D', '基于 Laravel 的 Unit3D 结构适配定义'),
   gazelle('Gazelle', 'Gazelle 结构适配定义'),
+  btitracker('BTiTracker', 'BtiTracker / TBDev 系结构适配定义'),
   custom('自定义', '按站点自定义规则的适配定义');
 
   const SiteFramework(this.label, this.description);
@@ -43,6 +44,29 @@ enum SiteAuthType {
       );
 }
 
+/// 站点是否允许以登录态（Cookie）抓取页面数据的策略。
+///
+/// 少数站点在规则里明确禁止用登录态抓取页面（例如 M-Team 只提供官方 API 存取令牌），
+/// 这类站点默认改为 API Key 认证，并在界面上说明原因；用户仍可在站点编辑页手动开启
+/// （规则以站点自身公告为准，本表只给默认值，不做强制）。
+abstract final class SiteCookiePolicy {
+  /// 已知「不允许 Cookie 抓取」的域名后缀。
+  static const List<String> cookieForbiddenSuffixes = <String>['m-team.cc', 'm-team.io'];
+
+  static bool allowsCookieByDefault(String host) {
+    final String normalized = host.toLowerCase().trim();
+    if (normalized.isEmpty) return true;
+    for (final String suffix in cookieForbiddenSuffixes) {
+      if (normalized == suffix || normalized.endsWith('.$suffix')) return false;
+    }
+    return true;
+  }
+
+  static String reason(String host) =>
+      '该站点不允许以登录态（Cookie）抓取页面数据（$host），请改用存取令牌 / API Key；'
+      '如需强行开启，请先确认站点规则允许。';
+}
+
 /// 站点连接状态（本地记录；展示时必须配文字，颜色不是唯一表达）。
 enum SiteHealth {
   unknown('未测试'),
@@ -71,6 +95,7 @@ class PtSite {
     this.enabled = true,
     this.favorite = false,
     this.credentialConfigured = false,
+    this.cookieAllowed = true,
     this.health = SiteHealth.unknown,
     this.lastTestedAt,
     this.createdAt,
@@ -90,6 +115,12 @@ class PtSite {
 
   /// 凭据是否已录入（仅标记，凭据本体在 SecureStore）。
   final bool credentialConfigured;
+
+  /// 是否允许以登录态（Cookie）抓取该站页面数据。
+  ///
+  /// 默认按 [SiteCookiePolicy] 的站点规则给值（例如 M-Team 这类不允许 Cookie 抓取的站点为 false），
+  /// 用户可在站点编辑页自行改写。
+  final bool cookieAllowed;
   final SiteHealth health;
   final DateTime? lastTestedAt;
   final DateTime? createdAt;
@@ -107,6 +138,7 @@ class PtSite {
     bool? enabled,
     bool? favorite,
     bool? credentialConfigured,
+    bool? cookieAllowed,
     SiteHealth? health,
     DateTime? lastTestedAt,
     DateTime? createdAt,
@@ -122,6 +154,7 @@ class PtSite {
         enabled: enabled ?? this.enabled,
         favorite: favorite ?? this.favorite,
         credentialConfigured: credentialConfigured ?? this.credentialConfigured,
+        cookieAllowed: cookieAllowed ?? this.cookieAllowed,
         health: health ?? this.health,
         lastTestedAt: lastTestedAt ?? this.lastTestedAt,
         createdAt: createdAt ?? this.createdAt,
@@ -138,6 +171,7 @@ class PtSite {
         'enabled': enabled,
         'favorite': favorite,
         'credentialConfigured': credentialConfigured,
+        'cookieAllowed': cookieAllowed,
         'health': health.name,
         'lastTestedAt': lastTestedAt?.toIso8601String(),
         'createdAt': createdAt?.toIso8601String(),
@@ -154,6 +188,8 @@ class PtSite {
         enabled: json['enabled'] as bool? ?? true,
         favorite: json['favorite'] as bool? ?? false,
         credentialConfigured: json['credentialConfigured'] as bool? ?? false,
+        cookieAllowed: json['cookieAllowed'] as bool? ??
+            SiteCookiePolicy.allowsCookieByDefault(json['baseUrl']?.toString() ?? ''),
         health: SiteHealth.fromName(json['health'] as String?),
         lastTestedAt: parseStoredDate(json['lastTestedAt']),
         createdAt: parseStoredDate(json['createdAt']),

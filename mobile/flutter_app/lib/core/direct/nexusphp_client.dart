@@ -23,6 +23,12 @@ enum SiteFetchFailureKind {
   /// 页面结构无法识别（站点改版或非 NexusPHP 结构）。
   unparsed('页面结构未识别'),
 
+  /// 该站不是 Cookie 认证：直连页面解析不适用（需要后端或对应 API 适配器）。
+  unsupportedAuth('认证方式不支持直连'),
+
+  /// 站点规则不允许以登录态（Cookie）抓取页面数据。
+  cookieForbidden('站点禁止 Cookie 抓取'),
+
   /// 其它未知失败。
   unknown('未知失败');
 
@@ -155,14 +161,7 @@ class NexusPhpClient {
         message: '站点地址不合法，请先修正站点地址',
       );
     }
-    final String cookie = cookieOf(credential);
-    if (cookie.isEmpty) {
-      throw SiteFetchException(
-        kind: SiteFetchFailureKind.missingCredential,
-        message: '${site.name} 未保存 Cookie，无法读取个人数据；请在站点里登录或导入 CookieCloud',
-        target: base.toString(),
-      );
-    }
+    final String cookie = requireDirectCookie(site, credential, base);
 
     final Uri target = UrlUtils.joinPath(base, '/index.php');
     final String html = await _getText(
@@ -215,15 +214,7 @@ class NexusPhpClient {
         message: '站点地址不合法，请先修正站点地址',
       );
     }
-    final String cookie = cookieOf(credential);
-    if (cookie.isEmpty) {
-      throw SiteFetchException(
-        kind: SiteFetchFailureKind.missingCredential,
-        message: '${site.name} 未保存 Cookie，读取站点资源需要登录态；'
-            '请在站点里登录或导入 CookieCloud / PTD 备份',
-        target: base.toString(),
-      );
-    }
+    final String cookie = requireDirectCookie(site, credential, base);
 
     final String trimmed = keyword.trim();
     final Map<String, String> query = <String, String>{
@@ -248,6 +239,46 @@ class NexusPhpClient {
       promotion: promotion,
       passkey: passkeyOf(credential, cookie),
     );
+  }
+
+  /// 直连页面解析的前置门禁：返回可用于请求的 Cookie，否则抛出**按认证方式归因**的异常。
+  ///
+  /// 直连 HTML 解析只在「站点允许 Cookie 抓取 且 该站用的是 Cookie 认证」时成立：
+  /// - 站点规则禁止 Cookie 抓取（例如 M-Team 只提供官方 API 令牌）→ cookieForbidden；
+  /// - 站点用的是 API Key / Passkey / 账号认证 → unsupportedAuth（需要后端或对应 API 适配器），
+  ///   不再笼统报「未保存 Cookie」（那会让人以为只要补个 Cookie 就行）；
+  /// - 确实是 Cookie 认证但本机没录 Cookie → missingCredential。
+  static String requireDirectCookie(
+    PtSite site,
+    Map<String, dynamic>? credential,
+    Uri base,
+  ) {
+    if (!site.cookieAllowed) {
+      throw SiteFetchException(
+        kind: SiteFetchFailureKind.cookieForbidden,
+        message: SiteCookiePolicy.reason(site.host),
+        target: base.toString(),
+      );
+    }
+    if (site.authType != SiteAuthType.cookie) {
+      throw SiteFetchException(
+        kind: SiteFetchFailureKind.unsupportedAuth,
+        message: '${site.name} 使用「${site.authType.label}」认证：直连页面解析不适用，'
+            '该站数据需要 NAS 后端或对应的 API 适配器；'
+            '如需改用 Cookie，可在站点编辑页把认证方式改成 Cookie（站点规则允许时）',
+        target: base.toString(),
+      );
+    }
+    final String cookie = cookieOf(credential);
+    if (cookie.isEmpty) {
+      throw SiteFetchException(
+        kind: SiteFetchFailureKind.missingCredential,
+        message: '${site.name} 未保存 Cookie，读取站点数据需要登录态；'
+            '请在站点里登录或导入 CookieCloud / PTD 备份',
+        target: base.toString(),
+      );
+    }
+    return cookie;
   }
 
   /// 从凭据里取 Cookie 值（支持 `type=cookie` 与直接给 `cookie` 字段两种形态）。

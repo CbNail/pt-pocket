@@ -19,7 +19,7 @@ enum AppEnvironment {
 
 abstract final class AppConfig {
   static const String appName = 'PT Pocket';
-  static const String appVersionFallback = '0.9.0';
+  static const String appVersionFallback = '0.9.1';
 
   /// NAS 后端 API 版本与前缀（版本化 API，移动端不直连数据库/Redis）。
   static const String apiVersion = 'v1';

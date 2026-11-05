@@ -15,6 +15,9 @@ class CredentialFields extends StatelessWidget {
     required this.secretController,
     required this.usernameController,
     required this.passwordController,
+    this.uidController,
+    this.deviceIdController,
+    this.showApiKeyExtras = false,
   });
 
   final SiteAuthType authType;
@@ -23,8 +26,16 @@ class CredentialFields extends StatelessWidget {
   final TextEditingController usernameController;
   final TextEditingController passwordController;
 
+  /// API Key 站点（如 M-Team）可附带的账号 UID 与设备标识；非该类型时忽略。
+  final TextEditingController? uidController;
+  final TextEditingController? deviceIdController;
+
+  /// 是否展示 API Key 的扩展字段（M-Team 这类官方 API 需要 UID / Device ID）。
+  final bool showApiKeyExtras;
+
   @override
   Widget build(BuildContext context) {
+    final ThemeData theme = Theme.of(context);
     switch (authType) {
       case SiteAuthType.cookie:
         return TextField(
@@ -38,13 +49,48 @@ class CredentialFields extends StatelessWidget {
           ),
         );
       case SiteAuthType.passkey:
-      case SiteAuthType.apiKey:
         return TextField(
           controller: secretController,
-          decoration: InputDecoration(
-            labelText: authType == SiteAuthType.passkey ? 'Passkey' : 'API Key',
-            hintText: authType == SiteAuthType.passkey ? '站点发放的 Passkey' : '站点 API 密钥',
+          decoration: const InputDecoration(
+            labelText: 'Passkey',
+            hintText: '站点发放的 Passkey',
           ),
+        );
+      case SiteAuthType.apiKey:
+        return Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: <Widget>[
+            TextField(
+              controller: secretController,
+              decoration: const InputDecoration(
+                labelText: 'API Key / 存取令牌',
+                hintText: '站点控制台生成的密钥',
+              ),
+            ),
+            if (showApiKeyExtras) ...<Widget>[
+              const SizedBox(height: AppSpacing.md),
+              TextField(
+                controller: uidController,
+                decoration: const InputDecoration(
+                  labelText: 'UID（可选）',
+                  hintText: 'API 令牌所属账号的用户 ID',
+                ),
+              ),
+              const SizedBox(height: AppSpacing.md),
+              TextField(
+                controller: deviceIdController,
+                decoration: const InputDecoration(
+                  labelText: 'Device ID（可选）',
+                  hintText: '用于浏览器查看详情页的设备标识',
+                ),
+              ),
+              const SizedBox(height: AppSpacing.xs),
+              Text(
+                'UID / Device ID 仅部分站点（如 M-Team 官方 API）需要；不填则只用令牌。',
+                style: theme.textTheme.bodySmall,
+              ),
+            ],
+          ],
         );
       case SiteAuthType.account:
         return Column(
@@ -72,6 +118,8 @@ Map<String, dynamic>? buildCredentialMap(
   required String secret,
   required String username,
   required String password,
+  String uid = '',
+  String deviceId = '',
 }) {
   final DateTime now = DateTime.now();
   switch (authType) {
@@ -80,10 +128,23 @@ Map<String, dynamic>? buildCredentialMap(
       if (value.isEmpty) return null;
       return <String, dynamic>{'type': authType.name, 'cookie': value, 'updatedAt': now.toIso8601String()};
     case SiteAuthType.passkey:
+      final String passkey = secret.trim();
+      if (passkey.isEmpty) return null;
+      return <String, dynamic>{
+        'type': authType.name,
+        'passkey': passkey,
+        'updatedAt': now.toIso8601String(),
+      };
     case SiteAuthType.apiKey:
       final String value = secret.trim();
       if (value.isEmpty) return null;
-      return <String, dynamic>{'type': authType.name, authType.name: value, 'updatedAt': now.toIso8601String()};
+      return <String, dynamic>{
+        'type': authType.name,
+        'apiKey': value,
+        if (uid.trim().isNotEmpty) 'uid': uid.trim(),
+        if (deviceId.trim().isNotEmpty) 'deviceId': deviceId.trim(),
+        'updatedAt': now.toIso8601String(),
+      };
     case SiteAuthType.account:
       if (username.trim().isEmpty || password.isEmpty) return null;
       return <String, dynamic>{
@@ -108,7 +169,8 @@ String describeCredential(Map<String, dynamic>? credential) {
     case SiteAuthType.passkey:
       return 'Passkey · 已保存';
     case SiteAuthType.apiKey:
-      return 'API Key · 已保存';
+      final String uid = credential['uid']?.toString() ?? '';
+      return uid.isEmpty ? 'API Key · 已保存' : 'API Key · 已保存（UID $uid）';
     case SiteAuthType.account:
       return '账号 ${credential['username'] ?? ''} · 密码已保存';
   }
