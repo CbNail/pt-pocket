@@ -1,6 +1,11 @@
+import 'dart:async';
+
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../core/adapters/site_adapter_registry.dart';
+import '../../core/direct/direct_providers.dart';
+import '../../core/direct/nexusphp_client.dart';
+import '../../core/models/moviepilot.dart';
 import '../../core/models/pt_site.dart';
 import '../../core/providers.dart';
 import '../../core/services/cookiecloud_service.dart';
@@ -42,7 +47,42 @@ class SiteListNotifier extends AsyncNotifier<List<PtSite>> {
   SiteRepository get _repo => ref.read(siteRepositoryProvider);
 
   @override
-  Future<List<PtSite>> build() async => _repo.loadAll();
+  Future<List<PtSite>> build() async {
+    final List<PtSite> sites = _repo.loadAll();
+    // 凭据可能由更早的版本、CookieCloud 或 PTD 备份直接写进安全存储而没有同步标记；
+    // 这里在后台按安全存储的真实内容校正一次「是否已配置凭据」，不阻塞首屏。
+    unawaited(reconcileCredentials(sites));
+    return sites;
+  }
+
+  /// 按本机安全存储校正每个站点的「已配置凭据」标记。
+  ///
+  /// 返回被修正的站点数。有此校正，「凭据其实在、标记却是未配置」的旧数据会自愈，
+  /// 界面不会再出现「可访问、已连通却仍显示缺少凭据」。
+  Future<int> reconcileCredentials([List<PtSite>? input]) async {
+    final List<PtSite> sites = input ?? _repo.loadAll();
+    int fixed = 0;
+    final List<PtSite> next = <PtSite>[];
+    for (final PtSite site in sites) {
+      final bool has = await _repo.hasCredential(site.id);
+      if (has != site.credentialConfigured) {
+        fixed++;
+        next.add(
+          site.copyWith(
+            credentialConfigured: has,
+            updatedAt: DateTime.now(),
+          ),
+        );
+      } else {
+        next.add(site);
+      }
+    }
+    if (fixed > 0) {
+      await _repo.saveAll(next);
+      _reload();
+    }
+    return fixed;
+  }
 
   void _reload() => state = AsyncData<List<PtSite>>(_repo.loadAll());
 
@@ -136,6 +176,35 @@ final ProviderFamily<PtSite?, String> siteByIdProvider =
 final FutureProviderFamily<Map<String, dynamic>?, String> siteCredentialProvider =
     FutureProvider.family<Map<String, dynamic>?, String>(
   (Ref ref, String siteId) => ref.watch(siteRepositoryProvider).readCredential(siteId),
+);
+
+/// 站点资源列表查询参数（同一站点 + 关键词 + 页码）。
+typedef SiteResourceQuery = ({String siteId, String keyword, int page});
+
+/// 站点资源列表：App 逐站直连站点 `torrents.php`（无关键词时即该站最新资源）。
+///
+/// 与搜索同一条链路（带该站 Cookie、解析同一批字段），因此失败原因也按站归因：
+/// 缺少凭据 / 登录态失效 / 被限流 / 网络不可达 / 页面结构未识别。
+final FutureProviderFamily<SearchPageResult, SiteResourceQuery> siteResourcesProvider =
+    FutureProvider.family<SearchPageResult, SiteResourceQuery>(
+  (Ref ref, SiteResourceQuery query) async {
+    final PtSite? site = ref.watch(siteByIdProvider(query.siteId));
+    if (site == null) {
+      throw const SiteFetchException(
+        kind: SiteFetchFailureKind.unparsed,
+        message: '站点已不存在，请返回站点页刷新后重试',
+      );
+    }
+    final Map<String, dynamic>? credential =
+        await ref.watch(siteCredentialProvider(query.siteId).future);
+    return ref.watch(nexusPhpClientProvider).search(
+          site,
+          keyword: query.keyword,
+          page: query.page,
+          pageSize: 50,
+          credential: credential,
+        );
+  },
 );
 
 /// 当前站点的适配定义。

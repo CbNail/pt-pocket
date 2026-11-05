@@ -251,17 +251,18 @@ void main() {
       await tester.pumpAndSettle();
     }
 
-    testWidgets('卡片展示核心指标，打码后数值被遮蔽', (WidgetTester tester) async {
+    testWidgets('概述展示核心指标，打码后数值被遮蔽', (WidgetTester tester) async {
       final (ProviderContainer c, _RoutingAdapter _) = await container();
       addTearDown(c.dispose);
       await pumpPage(tester, c);
 
-      // 核心指标：上传 / 下载 / 分享率 / 做种 / 时魔 / 签到。
+      // 概述展示：三列对齐的上传 / 下载 / 分享率 + 做种 / 时魔 / 签到胶囊。
       expect(find.text('上传'), findsWidgets);
+      expect(find.text('下载'), findsWidgets);
       expect(find.text('分享率'), findsWidgets);
-      expect(find.text('做种'), findsWidgets);
-      expect(find.text('时魔'), findsWidgets);
-      expect(find.text('12.50/h'), findsOneWidget);
+      expect(find.text('做种 30'), findsWidgets);
+      expect(find.text('时魔 12.50/h'), findsWidgets);
+      expect(find.text('签到 已签 · 连续 12 天'), findsWidgets);
       expect(find.text('2.00'), findsOneWidget);
 
       await tester.tap(find.byIcon(Icons.visibility));
@@ -269,12 +270,12 @@ void main() {
 
       // 打码后真实数值不再出现在界面上。
       expect(find.text('•••'), findsWidgets);
-      expect(find.text('12.50/h'), findsNothing);
+      expect(find.text('时魔 12.50/h'), findsNothing);
       expect(find.text('2.00'), findsNothing);
 
       await tester.tap(find.byIcon(Icons.visibility_off));
       await tester.pumpAndSettle();
-      expect(find.text('12.50/h'), findsOneWidget);
+      expect(find.text('时魔 12.50/h'), findsWidgets);
     });
 
     testWidgets('扩展展示补齐连接数 / HR / 邮件 / 邀请', (WidgetTester tester) async {

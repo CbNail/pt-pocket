@@ -25,6 +25,7 @@ import '../../features/sites/cookiecloud_import_page.dart';
 import '../../features/sites/ptd_import_page.dart';
 import '../../features/sites/site_add_page.dart';
 import '../../features/sites/site_detail_page.dart';
+import '../../features/sites/site_resources_page.dart';
 import '../../features/sites/sites_page.dart';
 import '../../features/sites/vaultwarden_login_page.dart';
 import 'app_routes.dart';
@@ -96,6 +97,15 @@ GoRouter createAppRouter({GlobalKey<NavigatorState>? navigatorKey}) {
                     parentNavigatorKey: rootKey,
                     builder: (BuildContext context, GoRouterState state) =>
                         SiteDetailPage(siteId: state.uri.queryParameters['siteId'] ?? ''),
+                  ),
+                  GoRoute(
+                    path: AppRoutes.siteResources,
+                    name: 'siteResources',
+                    parentNavigatorKey: rootKey,
+                    builder: (BuildContext context, GoRouterState state) =>
+                        SiteResourcesPage(
+                      siteId: state.uri.queryParameters['siteId'] ?? '',
+                    ),
                   ),
                   GoRoute(
                     path: AppRoutes.siteCookieCloud,

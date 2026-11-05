@@ -3,7 +3,7 @@ description: "PT Pocket —— 面向个人 PT 用户的自托管移动管理中
 publish_to: 'none'
 
 # versionName + versionCode（Android）/ CFBundleShortVersionString + CFBundleVersion（iOS）
-version: 0.8.0+14
+version: 0.9.0+15
 
 environment:
   sdk: ^3.13.7

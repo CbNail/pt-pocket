@@ -14,6 +14,7 @@ abstract final class AppRoutes {
   // 站点模块子页面
   static const String siteAdd = 'add';
   static const String siteDetail = 'detail';
+  static const String siteResources = 'resources';
   static const String siteCookieCloud = 'cookiecloud';
   static const String sitePtdImport = 'ptd-import';
   static const String siteVaultwarden = 'vaultwarden';
@@ -58,8 +59,11 @@ abstract final class AppRoutes {
   /// 资源情况展示路径；结果对象通过路由 `extra` 传入，避免超长 query。
   static const String torrentDetailPath = '$search/$torrentDetail';
 
-  /// 生成站点详情路径。
+  /// 生成站点详情（编辑）路径。
   static String siteDetailPath(String siteId) => '$sites/$siteDetail?siteId=$siteId';
+
+  /// 生成站点资源路径（从站点拉取的资源信息）。
+  static String siteResourcesPath(String siteId) => '$sites/$siteResources?siteId=$siteId';
 
   /// 生成下载器详情路径。
   static String downloaderDetailPath(String downloaderId) =>

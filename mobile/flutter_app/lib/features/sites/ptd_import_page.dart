@@ -31,6 +31,8 @@ class _PtdImportPageState extends ConsumerState<PtdImportPage> {
   PtdImportResult? _result;
   bool _importing = false;
   int? _importedCount;
+  int _credentialFilledCount = 0;
+  int _skippedCount = 0;
 
   /// 已选中的备份文件名（zip 或 json）。
   String? _fileName;
@@ -92,49 +94,102 @@ class _PtdImportPageState extends ConsumerState<PtdImportPage> {
     final PtdImportResult? result = _result;
     if (result == null) return;
 
-    final List<PtSite> existing = ref.read(siteListProvider).valueOrNull ?? const <PtSite>[];
-    final Set<String> existingHosts = existing.map((PtSite s) => s.host.toLowerCase()).toSet();
     final SiteListNotifier notifier = ref.read(siteListProvider.notifier);
-    int imported = 0;
+    // 先按本机安全存储校正一次「是否已配置凭据」：否则「本机其实有凭据、标记却是未配置」的
+    // 站点会被误判成缺凭据，进而被备份里的旧登录态覆盖。
+    await notifier.reconcileCredentials();
+
+    final List<PtSite> existing = ref.read(siteListProvider).valueOrNull ?? const <PtSite>[];
+    final Map<String, PtSite> existingByHost = <String, PtSite>{
+      for (final PtSite s in existing) s.host.toLowerCase(): s,
+    };
+    int created = 0;
+    int credentialFilled = 0;
+    int skipped = 0;
 
     setState(() => _importing = true);
     for (final PtdImportEntry entry in result.importableEntries) {
       final Uri? uri = SiteReachabilityProbe.parseSiteUri(entry.baseUrl!);
       if (uri == null) continue;
       final String host = uri.host.toLowerCase();
-      if (existingHosts.contains(host)) continue;
-
-      final String id = const Uuid().v4();
-      final SiteAuthType authType = entry.cookieString != null
-          ? SiteAuthType.cookie
-          : (entry.apiKey != null ? SiteAuthType.apiKey : SiteAuthType.passkey);
       final Map<String, dynamic>? credential = _credentialFor(entry);
-      await notifier.upsert(
-        PtSite(
+      final PtSite? target = existingByHost[host];
+
+      if (target == null) {
+        // 新站点：建站 + 写凭据（认证方式按实际写进去的凭据类型决定，避免标记与内容不一致）。
+        final String id = const Uuid().v4();
+        await notifier.upsert(
+          PtSite(
+            id: id,
+            name: entry.name,
+            baseUrl: uri.toString(),
+            authType: _authTypeFor(credential, fallbackName: entry.cookieString != null ? 'cookie' : null),
+            credentialConfigured: credential != null,
+            createdAt: DateTime.now(),
+            updatedAt: DateTime.now(),
+          ),
+        );
+        if (credential != null) {
+          await notifier.saveCredential(id, credential);
+        }
+        existingByHost[host] = PtSite(
           id: id,
           name: entry.name,
           baseUrl: uri.toString(),
-          authType: authType,
           credentialConfigured: credential != null,
-          createdAt: DateTime.now(),
-          updatedAt: DateTime.now(),
-        ),
-      );
-      if (credential != null) {
-        await notifier.saveCredential(id, credential);
+        );
+        created++;
+        continue;
       }
-      existingHosts.add(host);
-      imported++;
+
+      // 已有站点：备份里有凭据而本机还没有时补齐凭据。
+      // 不覆盖本机已保存的凭据（可能是更新的登录态），也不改动站点名称与地址。
+      if (credential != null && !target.credentialConfigured) {
+        await notifier.saveCredential(target.id, credential);
+        if (_authTypeFor(credential, fallbackName: null) != target.authType) {
+          await notifier.upsert(
+            target.copyWith(authType: _authTypeFor(credential, fallbackName: null)),
+          );
+        }
+        existingByHost[host] = target.copyWith(credentialConfigured: true);
+        credentialFilled++;
+        continue;
+      }
+      skipped++;
     }
 
     if (!mounted) return;
     setState(() {
       _importing = false;
-      _importedCount = imported;
+      _importedCount = created;
+      _credentialFilledCount = credentialFilled;
+      _skippedCount = skipped;
     });
     ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(content: Text(imported == 0 ? '没有新增站点（可能已存在或缺少地址）' : '已导入 $imported 个站点')),
+      SnackBar(content: Text(_summary(created, credentialFilled, skipped))),
     );
+  }
+
+  static String _summary(int created, int filled, int skipped) {
+    final List<String> parts = <String>[
+      if (created > 0) '新增 $created 个站点',
+      if (filled > 0) '为 $filled 个已有站点补齐凭据',
+      if (skipped > 0) '$skipped 个已有站点保留本机凭据',
+    ];
+    if (parts.isEmpty) return '没有可导入的站点（备份里缺少地址）';
+    return '导入完成：${parts.join('，')}';
+  }
+
+  /// 认证方式按真正写进去的凭据类型决定，避免出现「认证方式是 Cookie、内容却是 API Key」。
+  static SiteAuthType _authTypeFor(Map<String, dynamic>? credential, {String? fallbackName}) {
+    final String type = credential?['type']?.toString() ?? fallbackName ?? '';
+    return switch (type) {
+      'apiKey' => SiteAuthType.apiKey,
+      'passkey' => SiteAuthType.passkey,
+      'cookie' => SiteAuthType.cookie,
+      'account' => SiteAuthType.account,
+      _ => SiteAuthType.cookie,
+    };
   }
 
   static Map<String, dynamic>? _credentialFor(PtdImportEntry entry) {
@@ -339,7 +394,12 @@ class _PtdImportPageState extends ConsumerState<PtdImportPage> {
                     ),
                   if (_importedCount != null) ...<Widget>[
                     const SizedBox(height: AppSpacing.sm),
-                    Text('本次新增 $_importedCount 个站点', style: theme.textTheme.bodySmall),
+                    Text(
+                      '本次新增 $_importedCount 个站点'
+                      '${_credentialFilledCount > 0 ? '，为 $_credentialFilledCount 个已有站点补齐凭据' : ''}'
+                      '${_skippedCount > 0 ? '，$_skippedCount 个已有站点保留本机凭据' : ''}',
+                      style: theme.textTheme.bodySmall,
+                    ),
                   ],
                 ],
               ),

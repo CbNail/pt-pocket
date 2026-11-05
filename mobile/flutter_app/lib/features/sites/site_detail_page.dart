@@ -13,7 +13,10 @@ import '../../shared/widgets/status_badge.dart';
 import 'site_providers.dart';
 import 'widgets/credential_form.dart';
 
-/// 站点详情：凭据管理、连接测试、CookieCloud / PTD 导入与 WebView 登录入口（需求 1）。
+/// 站点编辑：站点信息、连接测试、凭据管理与参与范围（需求 1）。
+///
+/// 说明：原「导入与登录」模块已移除（批量导入入口在站点列表的更多菜单里）；
+/// 需要手动登录抓 Cookie 时，用凭据区里的「内置浏览器登录」按钮，不额外占一个分区。
 class SiteDetailPage extends ConsumerStatefulWidget {
   const SiteDetailPage({super.key, required this.siteId});
 
@@ -126,7 +129,7 @@ class _SiteDetailPageState extends ConsumerState<SiteDetailPage> {
     if (site == null) {
       return Scaffold(
         appBar: AppBar(
-          title: const Text('站点详情'),
+          title: const Text('编辑站点'),
           leading: IconButton(icon: const Icon(Icons.arrow_back), onPressed: _leave),
         ),
         body: ErrorStateView(
@@ -139,7 +142,7 @@ class _SiteDetailPageState extends ConsumerState<SiteDetailPage> {
 
     return Scaffold(
       appBar: AppBar(
-        title: Text(site.name),
+        title: Text('编辑 · ${site.name}'),
         leading: IconButton(icon: const Icon(Icons.arrow_back), onPressed: _leave),
         actions: <Widget>[
           IconButton(
@@ -229,6 +232,16 @@ class _SiteDetailPageState extends ConsumerState<SiteDetailPage> {
                         icon: const Icon(Icons.edit_outlined, size: AppSizes.iconSm),
                         label: Text(credential == null ? '录入凭据' : '更新凭据'),
                       ),
+                      OutlinedButton.icon(
+                        onPressed: () => context.go(
+                          AppRoutes.siteVaultwardenPath(
+                            siteId: site.id,
+                            initialUrl: site.baseUrl,
+                          ),
+                        ),
+                        icon: const Icon(Icons.login_outlined, size: AppSizes.iconSm),
+                        label: const Text('内置浏览器登录'),
+                      ),
                       if (credential != null)
                         TextButton.icon(
                           onPressed: () => _clearCredential(site),
@@ -239,35 +252,6 @@ class _SiteDetailPageState extends ConsumerState<SiteDetailPage> {
                   ),
                 ],
               ),
-            ),
-          ),
-          const SizedBox(height: AppSpacing.lg),
-          SectionCard(
-            title: '导入与登录',
-            subtitle: '从浏览器 CookieCloud、PTD 备份导入，或用内置 WebView 手动登录',
-            child: Column(
-              children: <Widget>[
-                _ActionTile(
-                  icon: Icons.cloud_download_outlined,
-                  title: 'CookieCloud 一键导入',
-                  subtitle: '按域名匹配该站点并写入 Cookie',
-                  onTap: () => context.go(AppRoutes.siteCookieCloudPathFor(siteId: site.id)),
-                ),
-                _ActionTile(
-                  icon: Icons.file_upload_outlined,
-                  title: '导入 PTD 备份',
-                  subtitle: '从 PTD / PT-depiler 导出的 JSON 恢复站点与凭据',
-                  onTap: () => context.go(AppRoutes.sitePtdImportPath),
-                ),
-                _ActionTile(
-                  icon: Icons.login_outlined,
-                  title: '内置 WebView 登录',
-                  subtitle: '打开 Vaultwarden 或站点登录页，手动完成登录后抓取 Cookie',
-                  onTap: () => context.go(
-                    AppRoutes.siteVaultwardenPath(siteId: site.id, initialUrl: site.baseUrl),
-                  ),
-                ),
-              ],
             ),
           ),
           const SizedBox(height: AppSpacing.lg),
@@ -336,33 +320,6 @@ class _InfoRow extends StatelessWidget {
           ),
         ],
       ),
-    );
-  }
-}
-
-class _ActionTile extends StatelessWidget {
-  const _ActionTile({
-    required this.icon,
-    required this.title,
-    required this.subtitle,
-    required this.onTap,
-  });
-
-  final IconData icon;
-  final String title;
-  final String subtitle;
-  final VoidCallback onTap;
-
-  @override
-  Widget build(BuildContext context) {
-    final ThemeData theme = Theme.of(context);
-    return ListTile(
-      contentPadding: EdgeInsets.zero,
-      leading: Icon(icon, size: AppSizes.iconMd, color: theme.colorScheme.primary),
-      title: Text(title, style: theme.textTheme.bodyMedium),
-      subtitle: Text(subtitle, style: theme.textTheme.bodySmall),
-      trailing: const Icon(Icons.chevron_right, size: AppSizes.iconMd),
-      onTap: onTap,
     );
   }
 }

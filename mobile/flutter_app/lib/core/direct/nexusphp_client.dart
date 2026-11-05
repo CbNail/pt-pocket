@@ -179,7 +179,26 @@ class NexusPhpClient {
     );
   }
 
-  /// 站内搜索（逐站下发，一页结果）。
+  /// 站点资源列表（`torrents.php` 不带关键词 = 该站最新资源）。
+  Future<SearchPageResult> browse(
+    PtSite site, {
+    required int page,
+    required int pageSize,
+    Map<String, dynamic>? credential,
+    PromotionFilter promotion = PromotionFilter.all,
+    CancelToken? cancelToken,
+  }) =>
+      search(
+        site,
+        keyword: '',
+        page: page,
+        pageSize: pageSize,
+        credential: credential,
+        promotion: promotion,
+        cancelToken: cancelToken,
+      );
+
+  /// 站内搜索（逐站下发，一页结果）；[keyword] 为空时等价于浏览该站资源列表。
   Future<SearchPageResult> search(
     PtSite site, {
     required String keyword,
@@ -200,14 +219,15 @@ class NexusPhpClient {
     if (cookie.isEmpty) {
       throw SiteFetchException(
         kind: SiteFetchFailureKind.missingCredential,
-        message: '${site.name} 未保存 Cookie，站内搜索需要登录态；请在站点里登录或导入 CookieCloud',
+        message: '${site.name} 未保存 Cookie，读取站点资源需要登录态；'
+            '请在站点里登录或导入 CookieCloud / PTD 备份',
         target: base.toString(),
       );
     }
 
+    final String trimmed = keyword.trim();
     final Map<String, String> query = <String, String>{
-      'search': keyword,
-      'notnewword': '1',
+      if (trimmed.isNotEmpty) ...<String, String>{'search': trimmed, 'notnewword': '1'},
       if (page > 1) 'page': '$page',
     };
     final Uri target = UrlUtils.joinPath(base, '/torrents.php')

@@ -4,28 +4,47 @@ import 'package:go_router/go_router.dart';
 
 import '../../core/models/pt_site.dart';
 import '../../core/models/status_models.dart';
+import '../../core/providers.dart';
 import '../../core/router/app_routes.dart';
 import '../../core/services/site_reachability_probe.dart';
+import '../../core/storage/app_keys.dart';
+import '../../core/storage/prefs_store.dart';
 import '../../core/theme/app_colors.dart';
 import '../../core/theme/design_tokens.dart';
 import '../../core/utils/format.dart';
 import '../../shared/widgets/section_card.dart';
 import '../../shared/widgets/state_views.dart';
 import '../../shared/widgets/status_badge.dart';
+import '../../shared/widgets/swipe_action_row.dart';
 import '../settings/status_providers.dart';
 import 'site_providers.dart';
+
+/// 站点列表的展示密度。
+enum SitesViewMode {
+  detailed('详细'),
+  compact('概述');
+
+  const SitesViewMode(this.label);
+
+  final String label;
+
+  /// 缺省为「概述」：一屏能看更多站点；切到「详细」再看全部指标。
+  static SitesViewMode fromName(String? value) =>
+      value == SitesViewMode.detailed.name ? SitesViewMode.detailed : SitesViewMode.compact;
+}
 
 /// 站点页（需求 4）：站点数据面板。
 ///
 /// 面板职责：
-/// - 每站展示图标、上传 / 下载 / 分享率 / 做种数 / 综合时魔 / 签到情况 /
-///   连接数 / HR 情况 / 邮件数 / 邀请数；
-/// - 顶部提供「打码」「扩展」「刷新」「更多（PT 历程）」四个入口；
+/// - 每站展示图标、状态与核心指标（上传 / 下载 / 分享率 / 做种 / 综合时魔 / 签到），
+///   切到「详细」时补齐全部指标（魔力 / 下载中 / 连接数 / 邮件 / 邀请 / 等级 / 加入时间 / HR）；
+/// - 顶部工具栏：打码开关、详细 / 概述切换、刷新全部、更多（PT 历程 / 监护室 / 签到 / 导入）；
+/// - 卡片点击进入「站点资源」（从站点拉取的信息 + 该站资源列表）；
+///   卡片右上角菜单与左滑都能到「编辑」「删除」；
 /// - 支持按「已刷新 / 未刷新 / 失败 / 未登录」四态筛选。
 ///
-/// 数据来源：App 直连各站点用户页（`profileDataProvider`），并在本机保存每日采样；
-/// 已配置 NAS 后端时，本地取不到的站点会由后端补齐。
-/// 未取到的字段一律标注「未采集」，而不是显示 0 冒充真实值。
+/// 数据来源：NAS 后端可用时由后端下发；不可用时 App 直连站点用户页（`profileDataProvider`
+/// 已封装该回退），并在本机保存每日采样。未取到的字段一律标注「未采集」，不显示 0 冒充。
 class SitesPage extends ConsumerStatefulWidget {
   const SitesPage({super.key});
 
@@ -37,20 +56,46 @@ class _SitesPageState extends ConsumerState<SitesPage> {
   final TextEditingController _query = TextEditingController();
   bool _favoriteFirst = false;
 
-  /// 打码开关：屏蔽所有数值，方便在公共场合查看。
+  /// 打码开关：屏蔽所有数值，方便在公共场合查看（落盘，重进页面保持）。
   bool _masked = false;
 
-  /// 扩展展示：打开后每站展示全部指标，关闭时只保留核心几项。
-  bool _expanded = false;
+  /// 展示密度：详细 / 概述（落盘，重进页面保持）。
+  SitesViewMode _viewMode = SitesViewMode.detailed;
+
+  /// 当前左滑展开的站点 id（同一列表同时只允许展开一行）。
+  String? _openId;
 
   final Set<SiteRefreshState> _refreshFilter = <SiteRefreshState>{};
 
   String? _testingId;
 
+  PrefsStore get _prefs => ref.read(prefsStoreProvider);
+
+  @override
+  void initState() {
+    super.initState();
+    _masked = _prefs.getBool(PrefKeys.sitesMasked) ?? false;
+    _viewMode = SitesViewMode.fromName(_prefs.getString(PrefKeys.sitesViewMode));
+  }
+
   @override
   void dispose() {
     _query.dispose();
     super.dispose();
+  }
+
+  void _toggleMasked() {
+    setState(() => _masked = !_masked);
+    _prefs.setBool(PrefKeys.sitesMasked, _masked);
+  }
+
+  void _toggleViewMode() {
+    setState(() {
+      _viewMode = _viewMode == SitesViewMode.detailed
+          ? SitesViewMode.compact
+          : SitesViewMode.detailed;
+    });
+    _prefs.setString(PrefKeys.sitesViewMode, _viewMode.name);
   }
 
   List<PtSite> _visible(List<PtSite> sites, Map<String, SiteStats> stats) {
@@ -107,6 +152,7 @@ class _SitesPageState extends ConsumerState<SitesPage> {
     if (confirmed != true) return;
     await ref.read(siteListProvider.notifier).remove(site.id);
     if (!mounted) return;
+    setState(() => _openId = null);
     _snack('已删除「${site.name}」');
   }
 
@@ -122,6 +168,13 @@ class _SitesPageState extends ConsumerState<SitesPage> {
     if (!mounted) return;
     final SiteRefreshView after = ref.read(siteRefreshControllerProvider);
     _snack(after.error == null ? '已刷新「${site.name}」数据' : '刷新失败：${after.error}');
+  }
+
+  void _openResources(PtSite site) => context.go(AppRoutes.siteResourcesPath(site.id));
+
+  void _openEdit(PtSite site) {
+    setState(() => _openId = null);
+    context.go(AppRoutes.siteDetailPath(site.id));
   }
 
   @override
@@ -142,13 +195,15 @@ class _SitesPageState extends ConsumerState<SitesPage> {
         actions: <Widget>[
           IconButton(
             tooltip: _masked ? '取消打码' : '数值打码',
-            onPressed: () => setState(() => _masked = !_masked),
+            onPressed: _toggleMasked,
             icon: Icon(_masked ? Icons.visibility_off : Icons.visibility),
           ),
           IconButton(
-            tooltip: _expanded ? '收起站点信息' : '展开每个站点的信息',
-            onPressed: () => setState(() => _expanded = !_expanded),
-            icon: Icon(_expanded ? Icons.view_compact : Icons.grid_view),
+            tooltip: _viewMode == SitesViewMode.detailed ? '切换为概述展示' : '切换为详细展示',
+            onPressed: _toggleViewMode,
+            icon: Icon(
+              _viewMode == SitesViewMode.detailed ? Icons.view_compact : Icons.grid_view,
+            ),
           ),
           IconButton(
             tooltip: '刷新每个站点的数据',
@@ -239,6 +294,24 @@ class _SitesPageState extends ConsumerState<SitesPage> {
             ),
           ),
           _filterBar(theme),
+          Padding(
+            padding: const EdgeInsets.fromLTRB(AppSpacing.lg, AppSpacing.sm, AppSpacing.lg, 0),
+            child: Row(
+              children: <Widget>[
+                Expanded(
+                  child: Text(
+                    '左滑卡片可编辑 / 删除；点卡片看该站资源',
+                    style: theme.textTheme.labelSmall,
+                    overflow: TextOverflow.ellipsis,
+                  ),
+                ),
+                Text(
+                  '${_viewMode.label}展示${_masked ? ' · 已打码' : ''}',
+                  style: theme.textTheme.labelSmall,
+                ),
+              ],
+            ),
+          ),
           Expanded(
             child: sitesAsync.when(
               loading: () => const LoadingStateView(message: '正在读取站点清单'),
@@ -337,22 +410,43 @@ class _SitesPageState extends ConsumerState<SitesPage> {
     return ListView.separated(
       padding: const EdgeInsets.fromLTRB(AppSpacing.lg, AppSpacing.sm, AppSpacing.lg, AppSpacing.xxl),
       itemCount: visible.length,
-      separatorBuilder: (BuildContext context, int index) => const SizedBox(height: AppSpacing.cardGap),
+      separatorBuilder: (BuildContext context, int index) =>
+          const SizedBox(height: AppSpacing.cardGap),
       itemBuilder: (BuildContext context, int index) {
         final PtSite site = visible[index];
-        return _SiteTile(
-          site: site,
-          stats: stats[site.id],
-          masked: _masked,
-          expanded: _expanded,
-          dataMissing: dataAsyncHasError(ref),
-          testing: _testingId == site.id,
-          refreshing: refreshView.refreshingSiteId == site.id,
-          onTap: () => context.go(AppRoutes.siteDetailPath(site.id)),
-          onTest: () => _test(site),
-          onRefresh: () => _refreshSite(site),
-          onToggleFavorite: () => ref.read(siteListProvider.notifier).toggleFavorite(site.id),
-          onDelete: () => _confirmDelete(site),
+        return SwipeActionRow(
+          itemKey: site.id,
+          openKey: _openId,
+          onOpen: (String? key) => setState(() => _openId = key),
+          actions: <SwipeActionButton>[
+            SwipeActionButton(
+              label: '编辑',
+              icon: Icons.edit_outlined,
+              onTap: () => _openEdit(site),
+            ),
+            SwipeActionButton(
+              label: '删除',
+              icon: Icons.delete_outline,
+              background: theme.colorScheme.errorContainer,
+              foreground: theme.colorScheme.onErrorContainer,
+              onTap: () => _confirmDelete(site),
+            ),
+          ],
+          child: _SiteTile(
+            site: site,
+            stats: stats[site.id],
+            masked: _masked,
+            viewMode: _viewMode,
+            dataMissing: dataAsyncHasError(ref),
+            testing: _testingId == site.id,
+            refreshing: refreshView.refreshingSiteId == site.id,
+            onTap: () => _openResources(site),
+            onTest: () => _test(site),
+            onRefresh: () => _refreshSite(site),
+            onEdit: () => _openEdit(site),
+            onToggleFavorite: () => ref.read(siteListProvider.notifier).toggleFavorite(site.id),
+            onDelete: () => _confirmDelete(site),
+          ),
         );
       },
     );
@@ -361,19 +455,20 @@ class _SitesPageState extends ConsumerState<SitesPage> {
   bool dataAsyncHasError(WidgetRef ref) => ref.read(profileDataProvider).hasError;
 }
 
-/// 站点列表项：图标 + 核心指标 + （可选）全部指标。
+/// 站点列表项：图标 + 核心指标 + （详细模式）全部指标。
 class _SiteTile extends StatelessWidget {
   const _SiteTile({
     required this.site,
     required this.stats,
     required this.masked,
-    required this.expanded,
+    required this.viewMode,
     required this.dataMissing,
     required this.testing,
     required this.refreshing,
     required this.onTap,
     required this.onTest,
     required this.onRefresh,
+    required this.onEdit,
     required this.onToggleFavorite,
     required this.onDelete,
   });
@@ -381,13 +476,14 @@ class _SiteTile extends StatelessWidget {
   final PtSite site;
   final SiteStats? stats;
   final bool masked;
-  final bool expanded;
+  final SitesViewMode viewMode;
   final bool dataMissing;
   final bool testing;
   final bool refreshing;
   final VoidCallback onTap;
   final VoidCallback onTest;
   final VoidCallback onRefresh;
+  final VoidCallback onEdit;
   final VoidCallback onToggleFavorite;
   final VoidCallback onDelete;
 
@@ -406,6 +502,13 @@ class _SiteTile extends StatelessWidget {
         SiteRefreshState.unknown => StatusTone.neutral,
       };
 
+  static StatusTone _careTone(CareState state) => switch (state) {
+        CareState.healthy => StatusTone.ok,
+        CareState.attention => StatusTone.warning,
+        CareState.atRisk => StatusTone.danger,
+        CareState.unknown => StatusTone.neutral,
+      };
+
   /// 打码直接替换字符，而不是只做视觉模糊：
   /// 模糊只影响渲染，读屏与文本选择仍会暴露原值，等于没打码。
   String _value(String text) => masked ? '•••' : text;
@@ -414,6 +517,7 @@ class _SiteTile extends StatelessWidget {
   Widget build(BuildContext context) {
     final ThemeData theme = Theme.of(context);
     final SiteRefreshState refreshState = stats?.refreshState ?? SiteRefreshState.unknown;
+    final bool detailed = viewMode == SitesViewMode.detailed;
 
     return SectionCard(
       onTap: onTap,
@@ -445,8 +549,14 @@ class _SiteTile extends StatelessWidget {
                         ],
                       ],
                     ),
-                    const SizedBox(height: AppSpacing.xxs),
-                    Text(site.host, style: theme.textTheme.bodySmall, overflow: TextOverflow.ellipsis),
+                    const SizedBox(height: 2),
+                    Text(
+                      site.host,
+                      style: theme.textTheme.bodySmall?.copyWith(
+                        color: theme.colorScheme.onSurfaceVariant,
+                      ),
+                      overflow: TextOverflow.ellipsis,
+                    ),
                     const SizedBox(height: AppSpacing.xs),
                     Wrap(
                       spacing: AppSpacing.xs,
@@ -460,11 +570,7 @@ class _SiteTile extends StatelessWidget {
                         if (stats != null && stats!.careState != CareState.unknown)
                           StatusBadge(
                             label: stats!.careState.label,
-                            tone: stats!.careState == CareState.healthy
-                                ? StatusTone.ok
-                                : (stats!.careState == CareState.attention
-                                    ? StatusTone.warning
-                                    : StatusTone.danger),
+                            tone: _careTone(stats!.careState),
                             compact: true,
                           )
                         else
@@ -488,10 +594,13 @@ class _SiteTile extends StatelessWidget {
               ),
               const SizedBox(width: AppSpacing.sm),
               if (testing || refreshing)
-                const SizedBox(
-                  width: 18,
-                  height: 18,
-                  child: CircularProgressIndicator(strokeWidth: 2),
+                const Padding(
+                  padding: EdgeInsets.all(AppSpacing.xs),
+                  child: SizedBox(
+                    width: 18,
+                    height: 18,
+                    child: CircularProgressIndicator(strokeWidth: 2),
+                  ),
                 )
               else
                 PopupMenuButton<String>(
@@ -505,11 +614,14 @@ class _SiteTile extends StatelessWidget {
                         onRefresh();
                       case 'favorite':
                         onToggleFavorite();
+                      case 'edit':
+                        onEdit();
                       case 'delete':
                         onDelete();
                     }
                   },
                   itemBuilder: (BuildContext context) => <PopupMenuEntry<String>>[
+                    const PopupMenuItem<String>(value: 'edit', child: Text('编辑站点')),
                     const PopupMenuItem<String>(value: 'test', child: Text('测试连接')),
                     const PopupMenuItem<String>(value: 'refresh', child: Text('刷新该站数据')),
                     PopupMenuItem<String>(
@@ -522,20 +634,16 @@ class _SiteTile extends StatelessWidget {
                 ),
             ],
           ),
-          const SizedBox(height: AppSpacing.sm),
+          const SizedBox(height: AppSpacing.md),
           if (stats == null)
             Text(
               dataMissing ? '该站数据暂未取到（可点右上角刷新重试）' : '尚无该站数据',
               style: theme.textTheme.bodySmall,
             )
           else ...<Widget>[
-            _metricsRow(stats!),
-            if (expanded) ...<Widget>[
-              const SizedBox(height: AppSpacing.sm),
-              _metricsGrid(theme, stats!),
-            ],
+            if (detailed) _metricsGrid(theme, stats!) else _metricsCompact(theme, stats!),
             if (stats!.refreshMessage.isNotEmpty) ...<Widget>[
-              const SizedBox(height: AppSpacing.xxs),
+              const SizedBox(height: AppSpacing.xs),
               Text(
                 stats!.refreshMessage,
                 style: theme.textTheme.bodySmall?.copyWith(
@@ -546,56 +654,108 @@ class _SiteTile extends StatelessWidget {
                 ),
               ),
             ],
+            const SizedBox(height: AppSpacing.xs),
+            Text(
+              stats!.refreshedAt == null
+                  ? '刷新时间：未采集'
+                  : '刷新时间：${formatDateTime(stats!.refreshedAt!)}',
+              style: theme.textTheme.labelSmall,
+            ),
           ],
         ],
       ),
     );
   }
 
-  /// 核心指标（打码时只保留标签，数值一律遮蔽）。
-  Widget _metricsRow(SiteStats data) {
-    final List<(String, String)> items = <(String, String)>[
-      ('上传', _value(formatBytes(data.uploadedBytes))),
-      ('下载', _value(formatBytes(data.downloadedBytes))),
-      ('分享率', _value(data.ratioLabel)),
-      ('做种', _value('${data.seedingCount}')),
-      ('时魔', _value(data.hourlyBonusLabel)),
-      ('签到', _value(data.signInLabel)),
-    ];
-    return Wrap(
-      spacing: AppSpacing.md,
-      runSpacing: AppSpacing.xxs,
+  /// 概述展示：三列对齐的核心指标 + 一行状态标签。
+  Widget _metricsCompact(ThemeData theme, SiteStats data) {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
       children: <Widget>[
-        for (final (String label, String value) in items) _Metric(label: label, value: value),
+        _metricRow(theme, <(String, String)>[
+          ('上传', _value(formatBytes(data.uploadedBytes))),
+          ('下载', _value(formatBytes(data.downloadedBytes))),
+          ('分享率', _value(data.ratioLabel)),
+        ]),
+        const SizedBox(height: AppSpacing.xs),
+        Wrap(
+          spacing: AppSpacing.xs,
+          runSpacing: AppSpacing.xxs,
+          children: <Widget>[
+            StatusBadge(label: '做种 ${_value('${data.seedingCount}')}', tone: StatusTone.info, compact: true),
+            StatusBadge(
+              label: '时魔 ${_value(data.hourlyBonusLabel)}',
+              tone: StatusTone.neutral,
+              compact: true,
+            ),
+            StatusBadge(label: '签到 ${_value(data.signInLabel)}', tone: StatusTone.neutral, compact: true),
+          ],
+        ),
       ],
     );
   }
 
-  /// 展开后的全部指标。
+  /// 详细展示：三列对齐的完整指标网格（含今日增量、契约、等级等）。
   Widget _metricsGrid(ThemeData theme, SiteStats data) {
     final List<(String, String)> items = <(String, String)>[
-      ('魔力', _value(formatNumber(data.bonus))),
+      ('上传', _value(formatBytes(data.uploadedBytes))),
+      ('下载', _value(formatBytes(data.downloadedBytes))),
+      ('分享率', _value(data.ratioLabel)),
+      ('今日上传', _value(data.todayUploadLabel)),
+      ('今日下载', _value(data.todayDownloadLabel)),
+      ('做种', _value('${data.seedingCount}')),
       ('下载中', _value('${data.leechingCount}')),
-      ('连接数', _value('${data.connections}')),
-      ('HR 情况', _value(data.hrLabel)),
-      ('邮件数', _value('${data.unreadMessages}')),
+      ('魔力', _value(formatNumber(data.bonus))),
+      ('时魔', _value(data.hourlyBonusLabel)),
       ('邀请数', _value('${data.invites}')),
+      ('邮件数', _value('${data.unreadMessages}')),
+      ('HR 情况', _value(data.hrLabel)),
       ('等级', _value(data.userClass.isEmpty ? '—' : data.userClass)),
       ('加入时间', _value(data.joinDate == null ? '—' : formatDate(data.joinDate!))),
+      ('签到', _value(data.signInLabel)),
+      ('契约', _value(data.contractLabel)),
+      ('连接数', _value('${data.connections}')),
+      ('保号', _value(data.policy?.summary ?? '—')),
     ];
+    final List<Widget> rows = <Widget>[];
+    for (int i = 0; i < items.length; i += 3) {
+      final List<(String, String)> slice = items.sublist(i, (i + 3).clamp(0, items.length));
+      rows.add(_metricRow(theme, slice));
+      if (i + 3 < items.length) rows.add(const SizedBox(height: AppSpacing.sm));
+    }
     return Container(
       padding: const EdgeInsets.all(AppSpacing.sm),
       decoration: BoxDecoration(
         color: theme.colorScheme.surfaceContainerHigh,
         borderRadius: AppRadius.cardBorder,
       ),
-      child: Wrap(
-        spacing: AppSpacing.md,
-        runSpacing: AppSpacing.sm,
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
         children: <Widget>[
-          for (final (String label, String value) in items) _Metric(label: label, value: value),
+          ...rows,
+          if (data.classPlanLabel.isNotEmpty) ...<Widget>[
+            const SizedBox(height: AppSpacing.sm),
+            Text(data.classPlanLabel, style: theme.textTheme.bodySmall),
+          ],
         ],
       ),
+    );
+  }
+
+  /// 三列对齐的指标行：列宽相等、标签在上数值在下，换行也能对齐。
+  Widget _metricRow(ThemeData theme, List<(String, String)> items) {
+    return Row(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: <Widget>[
+        for (int i = 0; i < 3; i++) ...<Widget>[
+          if (i > 0) const SizedBox(width: AppSpacing.md),
+          Expanded(
+            child: i < items.length
+                ? _Metric(label: items[i].$1, value: items[i].$2)
+                : const SizedBox.shrink(),
+          ),
+        ],
+      ],
     );
   }
 }
@@ -619,18 +779,23 @@ class _Metric extends StatelessWidget {
       crossAxisAlignment: CrossAxisAlignment.start,
       mainAxisSize: MainAxisSize.min,
       children: <Widget>[
-        Text(label, style: theme.textTheme.labelSmall),
+        Text(
+          label,
+          style: theme.textTheme.labelSmall?.copyWith(color: theme.colorScheme.onSurfaceVariant),
+          overflow: TextOverflow.ellipsis,
+        ),
         const SizedBox(height: 2),
         Text(
           value,
-          style: theme.textTheme.bodySmall?.copyWith(fontWeight: FontWeight.w600),
+          style: theme.textTheme.bodyMedium?.copyWith(fontWeight: FontWeight.w600),
+          overflow: TextOverflow.ellipsis,
         ),
       ],
     );
   }
 }
 
-/// 站点图标：后端给了地址就加载，否则用站点名首字生成。
+/// 站点图标：直连取到图标地址就加载，否则用站点名首字生成。
 class _SiteIcon extends StatelessWidget {
   const _SiteIcon({required this.theme, required this.stats, required this.site});
 
@@ -642,8 +807,8 @@ class _SiteIcon extends StatelessWidget {
   Widget build(BuildContext context) {
     final String url = stats?.iconUrl ?? '';
     final Widget fallback = Container(
-      width: 40,
-      height: 40,
+      width: 42,
+      height: 42,
       alignment: Alignment.center,
       decoration: BoxDecoration(
         color: theme.colorScheme.surfaceContainerHigh,
@@ -660,8 +825,8 @@ class _SiteIcon extends StatelessWidget {
       borderRadius: const BorderRadius.all(Radius.circular(AppRadius.chip)),
       child: Image.network(
         url,
-        width: 40,
-        height: 40,
+        width: 42,
+        height: 42,
         fit: BoxFit.cover,
         errorBuilder: (BuildContext context, Object error, StackTrace? stackTrace) => fallback,
       ),

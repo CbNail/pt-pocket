@@ -50,6 +50,14 @@ String formatNumber(int value) {
 }
 
 /// 日期文本（站点加入时间等，统一 `YYYY-MM-DD`）。
+/// 日期 + 时间（`yyyy-MM-dd HH:mm`），用于「刷新时间」这类需要到分钟的场景。
+String formatDateTime(DateTime date) {
+  final DateTime local = date.toLocal();
+  final String hour = local.hour.toString().padLeft(2, '0');
+  final String minute = local.minute.toString().padLeft(2, '0');
+  return '${formatDate(local)} $hour:$minute';
+}
+
 String formatDate(DateTime date) {
   final DateTime local = date.toLocal();
   final String month = local.month.toString().padLeft(2, '0');

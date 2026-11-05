@@ -18,6 +18,10 @@ abstract final class PrefKeys {
   // 外观
   static const String themeMode = 'theme.mode';
 
+  // 站点面板展示偏好：打码开关与详细 / 概述展示模式（非敏感，重进页面时恢复）
+  static const String sitesMasked = 'sites.masked';
+  static const String sitesViewMode = 'sites.viewMode';
+
   // 代理（旁路由）：整体以 JSON 保存，代理密码在 SecureStore
   static const String proxySettings = 'proxy.settings';
 
