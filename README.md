@@ -16,13 +16,66 @@ NAS 后端实现并可用后，本地直连取不到的条目会自动回退到 
    不允许只推代码不推文档，也不允许只在本地改完而不推送。
 3. 规格书里区分「当前源码事实」与「目标产品要求」，验收以规格书为准，不以“代码里已经有”为准。
 
-- 规格基线：《PT Pocket 产品需求与 App 设计规格书 V1.7（硬件适配版 + 交互改造 + 直连数据源 + 站点模块修复 + 凭据类型可选）》
+- 规格基线：《PT Pocket 产品需求与 App 设计规格书 V1.8（硬件适配版 + 交互改造 + 直连数据源 + 站点模块修复 + 凭据类型可选 + 下载器交互与直连能力）》
 - 目标设备：HUAWEI Mate 70 Pro+（HarmonyOS 6.1.0）
 - 服务端宿主：威联通 TS-451D、自组设备（PVE）
 
-## 1. 本轮更新（V1.7：站点凭据类型可选与默认项）
+## 1. 本轮更新（V1.8：下载器模块交互与直连能力）
 
-### 1.1 凭据类型不再写死 Cookie
+### 1.1 下载器列表页：视图切换、添加入口与卡片数据
+
+| 事项 | 现在的行为 |
+| --- | --- |
+| 右上角入口 | 依次是**视图切换**、**刷新**、**「＋」添加下载器**；添加流程复用原有添加页 |
+| 视图切换 | **列表图**（每行一个下载器 + 12 项数据网格）与**网格图**（两列卡片 + 状态占比环 / 分类柱状 / 速率曲线）；选择落盘（`ptp.downloaders.viewMode`），重进页面保持 |
+| 正文里的添加入口 | 原来的「＋ 添加下载器」悬浮按钮已移除；空清单只提示「点右上角「＋」添加」 |
+| 卡片数据 | 直连采集**种子总数 / 各状态计数 / 上传·下载限速 / 剩余空间 / 引擎版本**（qBittorrent 取 `/torrents/info` + `/sync/maindata`，Transmission 取 `torrent-get` + `session-stats` + `free-space`）；引擎没给的字段写「未采集」，限速 0 写「不限」，都不用 0 冒充 |
+| 图表口径 | 占比环、分类柱状、速率曲线全部用真实观测值：速率先在内存里采样，采样不足两点时显示「采样中」，不补造数据点 |
+
+### 1.2 任务页交互：左滑、长按多选、筛选、三点操作与添加任务
+
+| 事项 | 现在的行为 |
+| --- | --- |
+| 单条任务 | **左滑**露出「暂停 / 继续」（按该任务当前状态）与「删除」；删除前二次确认（仅移除记录 / 同时删除文件） |
+| 多选 | **长按**任务进入多选（左上角变成退出多选），底部批量条支持全选 / 暂停 / 继续 / 分类 / 标签 / 路径 / 删除；多选期间不做左滑，避免手势打架 |
+| 筛选 | 右上角**三横线**打开筛选面板：状态（带各状态计数）/ 分类 / 标签 / 路径 / 服务器 + 排序（6 个排序字段 + 倒序）；候选值只来自当前任务，改动即时生效，有筛选时按钮带角标 |
+| 任务操作 | 右上角**三个点**（任务卡片右上角也有）提供更改路径、更改分类、编辑标签、种子限速（KB/s）、复制种子哈希、复制磁力链接、重新汇报、重新校验、强制继续、自动种子管理；引擎不支持的项写明「该下载器不支持」并置灰 |
+| 添加任务 | 右上角**「＋」**打开添加面板：种子链接（可多行）、种子文件、自动种子管理、添加分类 / 标签、保存路径、添加后暂停 |
+
+### 1.3 直连能力与「该下载器不支持」口径
+
+1. **qBittorrent（`/api/v2`）**：在原有取任务与暂停 / 继续 / 删除 / 分类 / 标签 / 路径之上，补齐
+   **添加种子（链接 / 文件 multipart）、重新汇报、重新校验、强制继续、单任务下载 / 上传限速**，
+   并补充读取 `force_start` / `dl_limit` / `up_limit` / `trackers_count` / `magnet_uri`。
+2. **Transmission（`/transmission/rpc`）**：新增 `lib/core/direct/transmission_client.dart`——409 会话握手
+   （`X-Transmission-Session-Id`）、HTTP Basic 认证、任务字段映射（`status` 数字 → 统一状态、
+   `totalSize / leftUntilDone` → 已完成量）、会话统计与 `free-space`；支持添加种子（链接 / `metainfo`）、
+   暂停 / 继续 / 强制开始、删除、改保存路径（`location-move`）、标签（整组覆盖：追加 / 移除先取回当前标签再算新集合）、
+   重新校验 / 汇报、单任务限速（KB/s 换算）与 `auto-managed`。
+3. **能力边界不造假**：Transmission 没有「分类」，分类调用直接报「**该下载器不支持**」并提示改用标签，
+   不静默写进标签冒充成功；Transmission 也没有关闭「强制继续」的开关，关闭请求会说明原因；
+   qBittorrent 没有「自动种子管理」，菜单该项置灰并写明原因。Aria2 仍只走 NAS 后端转发，后端未配置时给出明确原因。
+4. **数据通道**：直连优先；直连因「缺少账号密码 / 网络不通」失败且 NAS 后端可用时回退 `/api/v1`，回退不改变页面结构。
+
+### 1.4 排版、工程与校验
+
+1. **排版对齐**：新增共用组件 `StatGrid`（等宽统计网格）与 `EqualChipGrid`（等宽胶囊网格）——
+   固定列数、**行行铺满**，条目数不足一行时用等宽空位补齐，避免「第二行只占一半」；
+   下载器列表的 12 项数据、任务卡片指标（改为三列网格）、筛选面板与添加面板的胶囊全部走这两套组件。
+2. **任务页顶部**：四个速率指标等宽排列，引擎版本胶囊移到「条数 + 排序」摘要行，不再挤占四列宽度；
+   任务卡片移除整排文字按钮，改为「左滑 + 三点菜单」，界面更整齐。
+3. **工程**：新增 `lib/core/direct/transmission_client.dart`、`lib/core/direct/downloader_speed_history.dart`、
+   `lib/shared/widgets/stat_grid.dart`、`lib/shared/widgets/equal_chip_grid.dart`、
+   `lib/shared/widgets/mini_charts.dart`、`lib/features/downloaders/widgets/task_filter_sheet.dart`、
+   `lib/features/downloaders/widgets/add_task_sheet.dart`；`SectionCard` 支持长按回调；
+   新增偏好键 `ptp.downloaders.viewMode`；版本升到 `0.9.2+17`。
+4. **校验**：`flutter analyze` 无任何问题；`flutter test` **305 个用例全部通过**
+   （本轮新增 `test/features/downloader_round2_test.dart` 29 个用例与 `test/core/downloader_clients_test.dart` 11 个用例，
+   并把既有下载器用例更新到新语义）。
+
+### 1.5 历史轮次（V1.7：站点凭据类型可选择与默认项）
+
+#### 1.5.1 凭据类型不再写死 Cookie
 
 站点分不同架构、不同站点规则，凭据类型不能只有 Cookie。现在的口径是**给默认项、也允许用户自行选择**：
 
@@ -42,7 +95,7 @@ NAS 后端实现并可用后，本地直连取不到的条目会自动回退到 
 凭据表单与弹层支持 UID / Device ID。
 新增 `test/features/site_auth_type_test.dart`（14 个用例）覆盖默认项、可选集合、Cookie 策略、模型落盘与直连归因。
 
-### 1.2 上一轮（V1.6）：「站点」模块 7 项修复
+#### 1.5.2 上一轮（V1.6）：「站点」模块 7 项修复
 
 | 问题 | 现在的行为 |
 | --- | --- |
@@ -59,7 +112,7 @@ NAS 后端实现并可用后，本地直连取不到的条目会自动回退到 
 `NexusPhpClient.browse()`（站点资源数据源）、`AppRoutes.siteResourcesPath`、`formatDateTime()`；
 新增 `test/features/sites_round2_test.dart`（10 个用例）覆盖上述行为。
 
-### 1.3 NAS 后端架构（10 个模块）
+#### 1.5.3 NAS 后端架构（10 个模块）
 
 一句话定位：**手机是遥控器，NAS 是一直开机工作的控制中心**——手机负责展示、交互与操作，
 后端负责真正执行任务、管理数据、连接外部服务；手机关机 / 没电 / 断网时，定时签到、数据采集与
@@ -90,13 +143,13 @@ NAS 后端实现并可用后，本地直连取不到的条目会自动回退到 
 多站聚合搜索，随后补定时任务与统计，最后扩展监护室、MP 与通知。App 内已有的直连数据源保留为
 **后端不可用时的降级通道**，不再作为后续功能的主实现路径。
 
-### 1.4 历史轮次（V1.5）摘要
+### 1.6 历史轮次（V1.5）摘要
 
 引入 App 直连数据源：监护室直连公开状态页；我的数据 / 养老进度直连站点用户页 + 本机每日采样 +
 内置等级路线；搜索逐站直连站内搜索页；下载器直连 qBittorrent WebUI；「连接与服务」内外网两个按钮
 合并为一个按色切换的按钮。详见规格书 §22。
 
-#### 1.4.1 历史轮次（V1.5）明细：根因与实现
+#### 1.6.1 历史轮次（V1.5）明细：根因与实现
 
 本轮解决的是**同一个根因**：`backend/` 尚未实现（见第 5 节），而监护室、我的数据、养老进度、
 站点统计、聚合搜索与下载器任务此前全部只走 NAS 接口 `/api/v1/*`，于是没有可用后端时它们一起失败，
@@ -140,7 +193,7 @@ NAS 后端实现并可用后，本地直连取不到的条目会自动回退到 
    （本轮新增 5 个测试文件覆盖监护室解析、NexusPHP 用户页与搜索解析、等级规则与本地历史、
    qBittorrent 直连、数据组装与下载器通道）。
 
-### 1.5 历史轮次（V1.4：交互改造、实时展示与模块对齐）
+### 1.7 历史轮次（V1.4：交互改造、实时展示与模块对齐）
 
 1. **地址录入统一**：所有 http/https 地址（连接与服务的服务地址、下载器、MoviePilot、CookieCloud）
    一律「协议点选 + 主机 + 端口 + 可选子路径」，主机与端口分开填、端口有默认值且可改；
@@ -176,7 +229,7 @@ NAS 后端实现并可用后，本地直连取不到的条目会自动回退到 
 10. **卡片内的列表项修复**：卡片容器（`SectionCard`）内垫一层透明 Material，
     避免卡片底色盖住开关 / 列表项的点击水波纹（调试模式下会直接抛断言）。
 
-#### 1.5.1 历史轮次（V1.2）摘要
+#### 1.7.1 历史轮次（V1.2）摘要
 
 1. **Android release 包网络权限**：`main/AndroidManifest.xml` 补 `INTERNET`、`ACCESS_NETWORK_STATE`
    与 `usesCleartextTraffic`。此前 release 包只合并 `main` 清单，缺权限导致所有出网请求失败，
@@ -207,13 +260,13 @@ NAS 后端实现并可用后，本地直连取不到的条目会自动回退到 
 ├── AGENTS.md                 # 协作与工程约定（提交、适配器、迁移、部署）
 ├── README.md
 ├── docs/
-│   ├── 需求规格书.md          # 需求与验收基线（V1.4，构建前必读）
+│   ├── 需求规格书.md          # 需求与验收基线（V1.8，构建前必读）
 │   ├── 需求规格书.docx        # 同一份规格书的 Word 版本（随 md 同步更新推送）
 │   ├── architecture.md       # 架构决策
 │   ├── api-contract.md       # /api/v1 接口契约
 │   └── app-backend-boundary.md  # 参考插件能力与 App / NAS 职责边界
 ├── mobile/flutter_app/       # Flutter 移动端（android / ios / windows）
-│   └── lib/core/direct/      # App 直连数据源（监护室公开状态页 / 站点用户页与搜索页 / qBittorrent WebUI / 本地采样）
+│   └── lib/core/direct/      # App 直连数据源（监护室公开状态页 / 站点用户页与搜索页 / qBittorrent WebUI / Transmission RPC / 本地采样）
 ├── backend/                  # NAS 后端服务（FastAPI + PostgreSQL + Redis）
 │   └── README.md             # 目前只有目录与接口约定，尚未实现
 ├── deploy/                   # docker-compose 与部署约定、.env.example
@@ -253,7 +306,15 @@ flutter build apk    # 需安装 Android SDK + JDK 17
   编辑 `features/sites/site_detail_page.dart`（站点信息 / 连接测试 / 凭据 / 参与范围）；
   凭据标记以安全存储为准，列表加载与 PTD 导入前都会先做一次校正；
 - 地址一律先过 `lib/core/network/url_utils.dart` 归一化，不要在页面里手写协议拼接；
-- 页面上的「测试连接」按钮同时承担“保存”职责：测试后自动落盘已填内容，成功与失败都保存。
+- 页面上的「测试连接」按钮同时承担“保存”职责：测试后自动落盘已填内容，成功与失败都保存；
+- 下载器模块结构：列表 `features/downloaders/downloaders_page.dart`（列表图 / 网格图切换、卡片数据与图表、左滑）、
+  任务中心 `features/downloaders/downloader_detail_page.dart`（左滑 / 长按多选 / 三横线筛选 / 三点操作 / 右上角「＋」添加任务）、
+  面板 `features/downloaders/widgets/task_filter_sheet.dart` 与 `features/downloaders/widgets/add_task_sheet.dart`；
+- 下载器直连：qBittorrent 见 `lib/core/direct/qbittorrent_client.dart`、Transmission 见 `lib/core/direct/transmission_client.dart`，
+  统一由 `lib/core/direct/downloader_gateway.dart` 按引擎分发，直连失败且后端可用时回退 `/api/v1`；
+  引擎不支持的能力必须报「该下载器不支持」并写明原因，**不得静默改写或用别的字段冒充**（例如把标签当分类）；
+- 统计项 / 筛选项 / 胶囊类排版一律用 `lib/shared/widgets/stat_grid.dart` 的 `StatGrid` 与
+  `lib/shared/widgets/equal_chip_grid.dart` 的 `EqualChipGrid`（等宽 + 行行铺满），不要在页面里用裸 `Wrap` 拼出半行。
 
 ## 4. Android 构建与发版
 

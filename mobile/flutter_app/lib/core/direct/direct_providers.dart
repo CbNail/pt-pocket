@@ -7,6 +7,7 @@ import '../storage/app_keys.dart';
 import '../storage/prefs_store.dart';
 import 'nexusphp_client.dart';
 import 'qbittorrent_client.dart';
+import 'transmission_client.dart';
 import 'savept_monitor_client.dart';
 import 'stats_history_store.dart';
 
@@ -49,6 +50,11 @@ final Provider<QbittorrentClient> qbittorrentClientProvider = Provider<Qbittorre
     ref.watch(proxyRuntimeProvider).createDio(),
     sessions: ref.watch(qbSessionStoreProvider),
   ),
+);
+
+/// Transmission 直连客户端（RPC 会话 id 缓存在客户端内部）。
+final Provider<TransmissionClient> transmissionClientProvider = Provider<TransmissionClient>(
+  (Ref ref) => TransmissionClient(ref.watch(proxyRuntimeProvider).createDio()),
 );
 
 /// 监护室快照：直连公开状态页；失败时降级用最近一次成功快照（界面会标注「缓存」）。

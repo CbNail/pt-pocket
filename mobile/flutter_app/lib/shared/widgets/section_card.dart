@@ -14,6 +14,7 @@ class SectionCard extends StatelessWidget {
     this.child,
     this.padding,
     this.onTap,
+    this.onLongPress,
   });
 
   final String? title;
@@ -22,6 +23,9 @@ class SectionCard extends StatelessWidget {
   final Widget? child;
   final EdgeInsetsGeometry? padding;
   final VoidCallback? onTap;
+
+  /// 长按手势（例如「长按进入多选」）；与 [onTap] 独立，两者可同时给。
+  final VoidCallback? onLongPress;
 
   @override
   Widget build(BuildContext context) {
@@ -70,12 +74,13 @@ class SectionCard extends StatelessWidget {
       child: Material(type: MaterialType.transparency, child: body),
     );
 
-    if (onTap == null) return card;
+    if (onTap == null && onLongPress == null) return card;
     return Material(
       color: Colors.transparent,
       child: InkWell(
         borderRadius: AppRadius.cardBorder,
         onTap: onTap,
+        onLongPress: onLongPress,
         child: card,
       ),
     );

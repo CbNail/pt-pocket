@@ -11,6 +11,7 @@ import 'package:pt_pocket/core/direct/downloader_gateway.dart';
 import 'package:pt_pocket/core/direct/nexusphp_client.dart';
 import 'package:pt_pocket/core/direct/qbittorrent_client.dart';
 import 'package:pt_pocket/core/direct/site_stats_service.dart';
+import 'package:pt_pocket/core/direct/transmission_client.dart';
 import 'package:pt_pocket/core/direct/stats_history_store.dart';
 import 'package:pt_pocket/core/models/downloader.dart';
 import 'package:pt_pocket/core/models/pt_site.dart';
@@ -153,6 +154,7 @@ void main() {
         qb: _StubQb(tasks: <DownloaderTask>[
           const DownloaderTask(hash: 'h1', name: '直连任务'),
         ]),
+        tr: _StubTr(),
       );
       final List<DownloaderTask> tasks = await gateway.fetchTasks('dl-1');
       expect(tasks.single.name, '直连任务');
@@ -170,6 +172,7 @@ void main() {
         (String id) async => null,
         nas: _NasStub(),
         qb: _StubQb(throwMissingCredential: true),
+        tr: _StubTr(),
       );
       final List<DownloaderTask> tasks = await gateway.fetchTasks('dl-1');
       expect(tasks.single.name, '来自后端');
@@ -187,6 +190,7 @@ void main() {
         (String id) async => null,
         nas: _NasStub(),
         qb: _StubQb(throwMissingCredential: true),
+        tr: _StubTr(),
       );
       expect(
         () => gateway.fetchTasks('dl-1'),
@@ -200,9 +204,9 @@ void main() {
       );
     });
 
-    test('Transmission 只走后端；后端不可用时说明清楚', () async {
+    test('Transmission 直连优先，后端只做回退', () async {
       final DownloaderGateway gateway = DownloaderGateway(
-        () => false,
+        () => true,
         (String id) => const DownloaderConfig(
           id: 'dl-2',
           name: 'tr',
@@ -212,14 +216,53 @@ void main() {
         (String id) async => null,
         nas: _NasStub(),
         qb: _StubQb(),
+        tr: _StubTr(tasks: <DownloaderTask>[
+          const DownloaderTask(hash: 'tr-1', name: '直连 TR 任务'),
+        ]),
+      );
+      final List<DownloaderTask> tasks = await gateway.fetchTasks('dl-2');
+      expect(tasks.single.name, '直连 TR 任务');
+    });
+
+    test('Transmission 直连缺凭据且后端可用时回退后端', () async {
+      final DownloaderGateway gateway = DownloaderGateway(
+        () => true,
+        (String id) => const DownloaderConfig(
+          id: 'dl-2',
+          name: 'tr',
+          kind: DownloaderKind.transmission,
+          baseUrl: 'http://127.0.0.1:9091',
+        ),
+        (String id) async => null,
+        nas: _NasStub(),
+        qb: _StubQb(),
+        tr: _StubTr(throwMissingCredential: true),
+      );
+      final List<DownloaderTask> tasks = await gateway.fetchTasks('dl-2');
+      expect(tasks.single.name, '来自后端');
+    });
+
+    test('Aria2 只走后端；后端不可用时说明清楚', () async {
+      final DownloaderGateway gateway = DownloaderGateway(
+        () => false,
+        (String id) => const DownloaderConfig(
+          id: 'dl-3',
+          name: 'a2',
+          kind: DownloaderKind.aria2,
+          baseUrl: 'http://127.0.0.1:6800',
+        ),
+        (String id) async => null,
+        nas: _NasStub(),
+        qb: _StubQb(),
+        tr: _StubTr(),
       );
       expect(
-        () => gateway.fetchTasks('dl-2'),
+        () => gateway.fetchTasks('dl-3'),
         throwsA(
           isA<DownloaderFetchException>().having(
             (DownloaderFetchException e) => e.message,
             'message',
-            contains('qBittorrent 直连'),
+            contains('需要 NAS 后端转发'),
           ),
         ),
       );
@@ -232,6 +275,7 @@ void main() {
         (String id) async => null,
         nas: _NasStub(),
         qb: _StubQb(),
+        tr: _StubTr(),
       );
       expect(
         () => gateway.fetchTasks('missing'),
@@ -258,6 +302,30 @@ class _StubQb extends QbittorrentClient {
       throw const DownloaderFetchException(
         kind: DownloaderFailureKind.missingCredential,
         message: '缺少 WebUI 用户名或密码',
+      );
+    }
+    return tasks;
+  }
+}
+
+/// Transmission 直连桩：只覆盖本文件用到的取任务。
+class _StubTr extends TransmissionClient {
+  _StubTr({this.tasks = const <DownloaderTask>[], this.throwMissingCredential = false})
+      : super(Dio());
+
+  final List<DownloaderTask> tasks;
+  final bool throwMissingCredential;
+
+  @override
+  Future<List<DownloaderTask>> fetchTasks(
+    DownloaderConfig config, {
+    Map<String, dynamic>? credential,
+    CancelToken? cancelToken,
+  }) async {
+    if (throwMissingCredential) {
+      throw const DownloaderFetchException(
+        kind: DownloaderFailureKind.missingCredential,
+        message: '缺少 RPC 用户名或密码',
       );
     }
     return tasks;

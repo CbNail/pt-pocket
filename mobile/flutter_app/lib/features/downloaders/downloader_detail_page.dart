@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 
@@ -11,9 +12,13 @@ import '../../core/theme/app_colors.dart';
 import '../../core/theme/design_tokens.dart';
 import '../../core/utils/format.dart';
 import '../../shared/widgets/section_card.dart';
+import '../../shared/widgets/stat_grid.dart';
 import '../../shared/widgets/state_views.dart';
 import '../../shared/widgets/status_badge.dart';
+import '../../shared/widgets/swipe_action_row.dart';
 import 'downloader_providers.dart';
+import 'widgets/add_task_sheet.dart';
+import 'widgets/task_filter_sheet.dart';
 
 /// 下载器任务中心（需求 3）。
 ///
@@ -37,6 +42,27 @@ class _DownloaderDetailPageState extends ConsumerState<DownloaderDetailPage> {
   TaskQuery _query = const TaskQuery();
   final Set<String> _selected = <String>{};
   bool _selectionMode = false;
+
+  /// 当前左滑展开的任务（同一列表同时只允许一行展开）。
+  String? _openTaskHash;
+
+  /// 长按进入多选：与参考客户端一致，长按即选中该条并进入多选模式。
+  void _enterSelection(String hash) {
+    setState(() {
+      _selectionMode = true;
+      _selected
+        ..clear()
+        ..add(hash);
+      _openTaskHash = null;
+    });
+  }
+
+  void _exitSelection() {
+    setState(() {
+      _selectionMode = false;
+      _selected.clear();
+    });
+  }
   String? _busyHash;
   bool _busyBatch = false;
 
@@ -365,6 +391,259 @@ class _DownloaderDetailPageState extends ConsumerState<DownloaderDetailPage> {
     ).whenComplete(controller.dispose);
   }
 
+  // ---------- 任务操作菜单（右上角三个点 / 任务卡片右上角） ----------
+
+  /// 当前操作目标：多选模式且有选中项时是选中的那些；否则为空（提示先长按选择）。
+  List<DownloaderTask> _selectedTasks(List<DownloaderTask> all) {
+    if (!_selectionMode || _selected.isEmpty) return const <DownloaderTask>[];
+    return all
+        .where((DownloaderTask task) => _selected.contains(task.hash))
+        .toList(growable: false);
+  }
+
+  DownloaderKind get _kind =>
+      ref.read(downloaderByIdProvider(widget.downloaderId))?.kind ?? DownloaderKind.qbittorrent;
+
+  /// 任务操作菜单项：按引擎能力给出可用性；不可用项写明「该下载器不支持」。
+  List<PopupMenuEntry<String>> _taskOpsItems(List<DownloaderTask> targets) {
+    final DownloaderKind kind = _kind;
+    final bool single = targets.length == 1;
+    final DownloaderTask? one = single ? targets.first : null;
+    final bool canCategory = kind == DownloaderKind.qbittorrent;
+    final bool canAutoManaged = DownloaderGateway.supportsAutoManaged(kind);
+    final bool forceOn =
+        targets.isNotEmpty && targets.every((DownloaderTask task) => task.forceStart);
+    final bool hasMagnet = one != null && one.magnetUri.isNotEmpty;
+
+    return <PopupMenuEntry<String>>[
+      const PopupMenuItem<String>(value: 'location', child: Text('更改路径')),
+      PopupMenuItem<String>(
+        value: 'category',
+        enabled: canCategory,
+        child: Text(canCategory ? '更改分类' : '更改分类（该下载器不支持）'),
+      ),
+      const PopupMenuItem<String>(value: 'tags', child: Text('编辑标签')),
+      const PopupMenuItem<String>(value: 'limits', child: Text('种子限速')),
+      const PopupMenuDivider(),
+      PopupMenuItem<String>(
+        value: 'copyHash',
+        enabled: single,
+        child: Text(single ? '复制种子哈希' : '复制种子哈希（仅单个任务）'),
+      ),
+      PopupMenuItem<String>(
+        value: 'copyMagnet',
+        enabled: hasMagnet,
+        child: Text(hasMagnet ? '复制磁力链接' : '复制磁力链接（无磁力链接）'),
+      ),
+      const PopupMenuDivider(),
+      const PopupMenuItem<String>(value: 'reannounce', child: Text('重新汇报')),
+      const PopupMenuItem<String>(value: 'recheck', child: Text('重新校验')),
+      CheckedPopupMenuItem<String>(
+        value: 'forceStart',
+        checked: forceOn,
+        child: const Text('强制继续'),
+      ),
+      PopupMenuItem<String>(
+        value: 'autoManaged',
+        enabled: canAutoManaged,
+        child: Text(canAutoManaged ? '自动种子管理…' : '自动种子管理（该下载器不支持）'),
+      ),
+    ];
+  }
+
+  Future<void> _runTaskOp(String op, List<DownloaderTask> targets) async {
+    if (targets.isEmpty) {
+      _snack('先长按任务进入多选（或在任务卡片右上角点 ⋮）再操作');
+      return;
+    }
+    final List<String> hashes =
+        targets.map((DownloaderTask task) => task.hash).toList(growable: false);
+    final DownloaderGateway api = ref.read(downloaderGatewayProvider);
+    switch (op) {
+      case 'location':
+        await _changeLocation(hashes);
+      case 'category':
+        await _changeCategory(hashes);
+      case 'tags':
+        await _changeTags(hashes);
+      case 'limits':
+        await _changeLimits(hashes, targets);
+      case 'copyHash':
+        await _copy(targets.first.hash, '已复制种子哈希');
+      case 'copyMagnet':
+        await _copy(targets.first.magnetUri, '已复制磁力链接');
+      case 'reannounce':
+        await _simpleOp(() => api.reannounce(widget.downloaderId, hashes), '已下发重新汇报');
+      case 'recheck':
+        await _simpleOp(() => api.recheck(widget.downloaderId, hashes), '已下发重新校验');
+      case 'forceStart':
+        final bool next = !(targets.every((DownloaderTask task) => task.forceStart));
+        await _simpleOp(
+          () => api.setForceStart(widget.downloaderId, hashes, next),
+          next ? '已开启强制继续' : '已关闭强制继续',
+        );
+      case 'autoManaged':
+        await _changeAutoManaged(hashes);
+    }
+  }
+
+  Future<void> _copy(String text, String message) async {
+    if (text.isEmpty) {
+      _snack('没有可复制的内容');
+      return;
+    }
+    await Clipboard.setData(ClipboardData(text: text));
+    _snack(message);
+  }
+
+  Future<void> _simpleOp(Future<void> Function() action, String done) async {
+    setState(() => _busyBatch = true);
+    try {
+      await action();
+      _snack(done);
+      _invalidateTasks();
+    } on ApiException catch (error) {
+      _snack('操作失败：${error.message}');
+    } on DownloaderFetchException catch (error) {
+      _snack('操作失败：${error.message}');
+    } finally {
+      if (mounted) setState(() => _busyBatch = false);
+    }
+  }
+
+  /// 种子限速：输入单位用 KB/s（Transmission 的原生单位，避免换算误差）。
+  Future<void> _changeLimits(List<String> hashes, List<DownloaderTask> targets) async {
+    if (hashes.isEmpty) return;
+    final DownloaderTask? one = targets.length == 1 ? targets.first : null;
+    final _SeedLimits? limits = await showDialog<_SeedLimits>(
+      context: context,
+      builder: (BuildContext dialogContext) => _SeedLimitsDialog(
+        downloadKb: one == null || one.downloadLimitBytes <= 0 ? 0 : one.downloadLimitBytes ~/ 1024,
+        uploadKb: one == null || one.uploadLimitBytes <= 0 ? 0 : one.uploadLimitBytes ~/ 1024,
+      ),
+    );
+    if (limits == null) return;
+
+    final DownloaderGateway api = ref.read(downloaderGatewayProvider);
+    await _simpleOp(
+      () async {
+        await api.setDownloadLimit(
+          widget.downloaderId,
+          hashes,
+          limits.downloadKb <= 0 ? 0 : limits.downloadKb * 1024,
+        );
+        await api.setUploadLimit(
+          widget.downloaderId,
+          hashes,
+          limits.uploadKb <= 0 ? 0 : limits.uploadKb * 1024,
+        );
+      },
+      limits.downloadKb <= 0 && limits.uploadKb <= 0
+          ? '已取消限速（不限）'
+          : '已设置限速：下载 ${limits.downloadKb <= 0 ? '不限' : '${limits.downloadKb} KB/s'} · '
+              '上传 ${limits.uploadKb <= 0 ? '不限' : '${limits.uploadKb} KB/s'}',
+    );
+  }
+
+  /// 自动种子管理：只有 Transmission 有该开关；没有取值接口，用对话框确认。
+  Future<void> _changeAutoManaged(List<String> hashes) async {
+    if (hashes.isEmpty) return;
+    bool enabled = true;
+    final bool? confirmed = await showDialog<bool>(
+      context: context,
+      builder: (BuildContext dialogContext) => StatefulBuilder(
+        builder: (BuildContext context, StateSetter setDialogState) => AlertDialog(
+          title: const Text('自动种子管理'),
+          content: SwitchListTile(
+            contentPadding: EdgeInsets.zero,
+            value: enabled,
+            onChanged: (bool value) => setDialogState(() => enabled = value),
+            title: const Text('开启自动管理'),
+            subtitle: const Text('由下载器按队列与速率自动启停该任务'),
+          ),
+          actions: <Widget>[
+            TextButton(
+              onPressed: () => Navigator.of(dialogContext).pop(false),
+              child: const Text('取消'),
+            ),
+            FilledButton(
+              onPressed: () => Navigator.of(dialogContext).pop(true),
+              child: const Text('应用'),
+            ),
+          ],
+        ),
+      ),
+    );
+    if (confirmed != true) return;
+    await _simpleOp(
+      () => ref.read(downloaderGatewayProvider).setAutoManaged(widget.downloaderId, hashes, enabled),
+      enabled ? '已开启自动种子管理' : '已关闭自动种子管理',
+    );
+  }
+
+  // ---------- 添加任务 ----------
+
+  /// 打开「添加任务」面板：候选分类 / 标签 / 路径取不到也不影响（可手填）。
+  Future<void> _openAddTaskSheet() async {
+    final DownloaderConfig? config = ref.read(downloaderByIdProvider(widget.downloaderId));
+    if (config == null) return;
+    DownloaderTaskOption options = const DownloaderTaskOption();
+    try {
+      options = await ref.read(downloaderTaskOptionsProvider(widget.downloaderId).future);
+    } catch (_) {
+      // 候选值只是便利项；取不到就让用户手填，不阻断添加。
+    }
+    if (!mounted) return;
+    final AddTaskRequest? request = await showAddTaskSheet(
+      context,
+      kind: config.kind,
+      options: options,
+      defaultSavePath: config.defaultSavePath,
+    );
+    if (request == null) return;
+    await _submitAddTask(config, request);
+  }
+
+  Future<void> _submitAddTask(DownloaderConfig config, AddTaskRequest request) async {
+    if (request.isEmpty) {
+      _snack('请填种子链接，或选择一个种子文件');
+      return;
+    }
+    final DownloaderGateway api = ref.read(downloaderGatewayProvider);
+    setState(() => _busyBatch = true);
+    try {
+      if (request.links.isNotEmpty) {
+        await api.addTorrentLinks(
+          widget.downloaderId,
+          links: request.links,
+          category: request.category,
+          tags: request.tags,
+          savePath: request.savePath,
+          paused: request.paused,
+        );
+      }
+      if (request.hasFile) {
+        await api.addTorrentFile(
+          widget.downloaderId,
+          bytes: request.fileBytes,
+          filename: request.fileName,
+          category: request.category,
+          tags: request.tags,
+          savePath: request.savePath,
+          paused: request.paused,
+        );
+      }
+      _snack('已向「${config.name}」提交 ${request.itemCount} 个任务');
+      _invalidateTasks();
+    } on ApiException catch (error) {
+      _snack('添加失败：${error.message}');
+    } on DownloaderFetchException catch (error) {
+      _snack('添加失败：${error.message}');
+    } finally {
+      if (mounted) setState(() => _busyBatch = false);
+    }
+  }
+
   // ---------- 界面 ----------
 
   @override
@@ -392,34 +671,35 @@ class _DownloaderDetailPageState extends ConsumerState<DownloaderDetailPage> {
     return Scaffold(
       appBar: AppBar(
         title: Text(config.name),
-        leading: IconButton(icon: const Icon(Icons.arrow_back), onPressed: _leave),
+        leading: IconButton(
+          icon: Icon(_selectionMode ? Icons.close : Icons.arrow_back),
+          tooltip: _selectionMode ? '退出多选' : '返回',
+          onPressed: _selectionMode ? _exitSelection : _leave,
+        ),
         actions: <Widget>[
           IconButton(
-            tooltip: _selectionMode ? '退出多选' : '多选任务',
-            onPressed: () => setState(() {
-              _selectionMode = !_selectionMode;
-              if (!_selectionMode) _selected.clear();
-            }),
-            icon: Icon(_selectionMode ? Icons.close : Icons.checklist),
+            tooltip: '筛选（状态 / 分类 / 标签 / 路径 / 服务器）与排序',
+            onPressed: () => _openFilterSheet(
+              tasksAsync.valueOrNull ?? const <DownloaderTask>[],
+            ),
+            icon: Badge(
+              isLabelVisible: !_query.isEmptyFilter,
+              label: Text('${_query.activeFilterCount}'),
+              child: const Icon(Icons.filter_list),
+            ),
           ),
-          PopupMenuButton<TaskSort>(
-            tooltip: '排序',
-            icon: const Icon(Icons.sort),
-            onSelected: (TaskSort sort) => setState(() => _query = _query.copyWith(sort: sort)),
-            itemBuilder: (BuildContext context) => <PopupMenuEntry<TaskSort>>[
-              for (final TaskSort sort in TaskSort.values)
-                CheckedPopupMenuItem<TaskSort>(
-                  value: sort,
-                  checked: _query.sort == sort,
-                  child: Text(sort.label),
-                ),
-              const PopupMenuDivider(),
-              CheckedPopupMenuItem<TaskSort>(
-                value: _query.sort,
-                checked: _query.descending,
-                child: const Text('倒序（新/大在前）'),
-              ),
-            ],
+          PopupMenuButton<String>(
+            tooltip: '任务操作（路径 / 分类 / 标签 / 限速 / 复制 / 汇报 / 校验 / 强制继续）',
+            icon: const Icon(Icons.more_vert),
+            itemBuilder: (BuildContext context) =>
+                _taskOpsItems(_selectedTasks(tasksAsync.valueOrNull ?? const <DownloaderTask>[])),
+            onSelected: (String op) =>
+                _runTaskOp(op, _selectedTasks(tasksAsync.valueOrNull ?? const <DownloaderTask>[])),
+          ),
+          IconButton(
+            tooltip: '添加任务到该下载器',
+            onPressed: _openAddTaskSheet,
+            icon: const Icon(Icons.add),
           ),
           IconButton(
             tooltip: '刷新任务',
@@ -449,10 +729,6 @@ class _DownloaderDetailPageState extends ConsumerState<DownloaderDetailPage> {
 
   Widget _tasksView(ThemeData theme, List<DownloaderTask> tasks) {
     final List<DownloaderTask> visible = _query.apply(tasks);
-    final List<String> servers = <String>{
-      for (final DownloaderTask task in tasks) if (task.tracker.isNotEmpty) task.tracker,
-    }.toList(growable: false)
-      ..sort();
 
     final QbTransferInfo? transfer = ref
         .watch(downloaderTransferProvider(widget.downloaderId))
@@ -461,19 +737,7 @@ class _DownloaderDetailPageState extends ConsumerState<DownloaderDetailPage> {
     return Column(
       children: <Widget>[
         if (transfer != null) _transferBar(theme, transfer),
-        _filterBar(theme, servers, tasks),
-        Padding(
-          padding: const EdgeInsets.fromLTRB(AppSpacing.lg, 0, AppSpacing.lg, AppSpacing.xs),
-          child: Align(
-            alignment: Alignment.centerLeft,
-            child: Text(
-              _query.isEmptyFilter
-                  ? '共 ${tasks.length} 条任务'
-                  : '筛选出 ${visible.length} 条 / 共 ${tasks.length} 条',
-              style: theme.textTheme.bodySmall,
-            ),
-          ),
-        ),
+        _filterSummary(theme, tasks, visible.length, transfer?.version ?? ''),
         Expanded(
           child: visible.isEmpty
               ? EmptyStateView(
@@ -495,7 +759,7 @@ class _DownloaderDetailPageState extends ConsumerState<DownloaderDetailPage> {
                       const SizedBox(height: AppSpacing.md),
                   itemBuilder: (BuildContext context, int index) {
                     final DownloaderTask task = visible[index];
-                    return _TaskCard(
+                    final _TaskCard card = _TaskCard(
                       task: task,
                       busy: _busyHash == task.hash || _busyBatch,
                       selectionMode: _selectionMode,
@@ -507,12 +771,40 @@ class _DownloaderDetailPageState extends ConsumerState<DownloaderDetailPage> {
                           _selected.remove(task.hash);
                         }
                       }),
-                      onPause: () => _taskAction(<String>[task.hash], 'pause'),
-                      onResume: () => _taskAction(<String>[task.hash], 'resume'),
-                      onRemove: () => _removeTasks(<String>[task.hash]),
-                      onCategory: () => _changeCategory(<String>[task.hash]),
-                      onTags: () => _changeTags(<String>[task.hash]),
-                      onLocation: () => _changeLocation(<String>[task.hash]),
+                      onLongPress: () => _enterSelection(task.hash),
+                      menuItems: _selectionMode
+                          ? const <PopupMenuEntry<String>>[]
+                          : _taskOpsItems(<DownloaderTask>[task]),
+                      onMenuSelected: (String op) => _runTaskOp(op, <DownloaderTask>[task]),
+                    );
+
+                    // 多选模式下不做左滑：否则「滑动选行」与「滑动露出操作」会互相打架。
+                    if (_selectionMode) return card;
+                    return SwipeActionRow(
+                      itemKey: task.hash,
+                      openKey: _openTaskHash,
+                      onOpen: (String? key) => setState(() => _openTaskHash = key),
+                      actions: <SwipeActionButton>[
+                        SwipeActionButton(
+                          label: task.isPaused ? '继续' : '暂停',
+                          icon: task.isPaused ? Icons.play_arrow : Icons.pause,
+                          onTap: () {
+                            setState(() => _openTaskHash = null);
+                            _taskAction(<String>[task.hash], task.isPaused ? 'resume' : 'pause');
+                          },
+                        ),
+                        SwipeActionButton(
+                          label: '删除',
+                          icon: Icons.delete_outline,
+                          background: theme.colorScheme.errorContainer,
+                          foreground: theme.colorScheme.onErrorContainer,
+                          onTap: () {
+                            setState(() => _openTaskHash = null);
+                            _removeTasks(<String>[task.hash]);
+                          },
+                        ),
+                      ],
+                      child: card,
                     );
                   },
                 ),
@@ -553,89 +845,63 @@ class _DownloaderDetailPageState extends ConsumerState<DownloaderDetailPage> {
               ),
             ),
           ],
-          if (info.version.isNotEmpty)
-            StatusBadge(label: 'qB ${info.version}', tone: StatusTone.info, compact: true),
-        ],
+          ],
       ),
     );
   }
 
-  Widget _filterBar(ThemeData theme, List<String> servers, List<DownloaderTask> tasks) {
-    int countOf(TaskState state) =>
-        tasks.where((DownloaderTask task) => task.state == state).length;
+  /// 打开筛选面板：状态 / 分类 / 标签 / 路径 / 服务器 + 排序，改动即时生效。
+  Future<void> _openFilterSheet(List<DownloaderTask> tasks) async {
+    if (tasks.isEmpty) {
+      _snack('任务还没读取到，稍后再试或先刷新');
+      return;
+    }
+    await showTaskFilterSheet(
+      context,
+      query: _query,
+      tasks: tasks,
+      onChanged: (TaskQuery next) => setState(() => _query = next),
+    );
+  }
+
+  /// 筛选摘要 + 条数：条件写成一行，改条件点右上角三横线。
+  Widget _filterSummary(
+    ThemeData theme,
+    List<DownloaderTask> tasks,
+    int visibleCount,
+    String version,
+  ) {
+    final List<String> parts = <String>[
+      if (_query.statuses.isNotEmpty)
+        '状态 ${_query.statuses.map((TaskState s) => s.label).join('/')}',
+      if (_query.categories.isNotEmpty) '分类 ${_query.categories.join('/')}',
+      if (_query.tags.isNotEmpty) '标签 ${_query.tags.join('/')}',
+      if (_query.paths.isNotEmpty) '路径 ${_query.paths.join('/')}',
+      if (_query.servers.isNotEmpty) '服务器 ${_query.servers.join('/')}',
+    ];
     return Padding(
       padding: const EdgeInsets.fromLTRB(AppSpacing.lg, AppSpacing.sm, AppSpacing.lg, AppSpacing.xs),
-      child: Column(
+      child: Row(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: <Widget>[
-          Wrap(
-            spacing: AppSpacing.xs,
-            runSpacing: AppSpacing.xxs,
-            children: <Widget>[
-              FilterChip(
-                label: const Text('全部状态'),
-                selected: _query.statuses.isEmpty,
-                onSelected: (bool _) =>
-                    setState(() => _query = _query.copyWith(statuses: <TaskState>{})),
-              ),
-              for (final TaskState state in const <TaskState>[
-                TaskState.downloading,
-                TaskState.seeding,
-                TaskState.completed,
-                TaskState.paused,
-                TaskState.queued,
-                TaskState.checking,
-                TaskState.error,
-              ])
-                FilterChip(
-                  // 带上各状态数量（和 Bit Control 之类的客户端一样一眼看出分布），
-                  // 数量单独放一个 Text，状态名仍是独立文本节点，便于读屏与按文本查找。
-                  label: Row(
-                    mainAxisSize: MainAxisSize.min,
-                    children: <Widget>[
-                      Text(state.label),
-                      const SizedBox(width: AppSpacing.xxs),
-                      Text('${countOf(state)}', style: theme.textTheme.labelSmall),
-                    ],
-                  ),
-                  selected: _query.statuses.contains(state),
-                  onSelected: (bool value) => setState(() {
-                    final Set<TaskState> next = <TaskState>{..._query.statuses};
-                    if (value) {
-                      next.add(state);
-                    } else {
-                      next.remove(state);
-                    }
-                    _query = _query.copyWith(statuses: next);
-                  }),
-                ),
-            ],
+          Expanded(
+            child: Text(
+              _query.isEmptyFilter
+                  ? '共 ${tasks.length} 条任务'
+                  : '筛选出 $visibleCount 条 / 共 ${tasks.length} 条 · ${parts.join(' · ')}',
+              style: theme.textTheme.bodySmall,
+              maxLines: 2,
+              overflow: TextOverflow.ellipsis,
+            ),
           ),
-          const SizedBox(height: AppSpacing.xs),
-          Row(
-            children: <Widget>[
-              Text('服务器', style: theme.textTheme.bodySmall),
-              const SizedBox(width: AppSpacing.sm),
-              Expanded(
-                child: DropdownButton<String>(
-                  isExpanded: true,
-                  value: _query.tracker.isEmpty ? '' : _query.tracker,
-                  items: <DropdownMenuItem<String>>[
-                    const DropdownMenuItem<String>(value: '', child: Text('全部服务器')),
-                    for (final String server in servers)
-                      DropdownMenuItem<String>(value: server, child: Text(server)),
-                  ],
-                  onChanged: (String? value) =>
-                      setState(() => _query = _query.copyWith(tracker: value ?? '')),
-                ),
-              ),
-              TextButton(
-                onPressed: _query.isEmptyFilter && _query.sort == TaskSort.addedAt
-                    ? null
-                    : () => setState(() => _query = const TaskQuery()),
-                child: const Text('重置'),
-              ),
-            ],
+          const SizedBox(width: AppSpacing.sm),
+          if (version.isNotEmpty) ...<Widget>[
+            StatusBadge(label: 'v$version', tone: StatusTone.info, compact: true),
+            const SizedBox(width: AppSpacing.xs),
+          ],
+          Text(
+            '排序 ${_query.sort.label}${_query.descending ? ' ↓' : ' ↑'}',
+            style: theme.textTheme.labelSmall,
           ),
         ],
       ),
@@ -737,6 +1003,76 @@ class _TagsResult {
       };
 }
 
+/// 种子限速的结果（KB/s；0 表示不限）。
+typedef _SeedLimits = ({int downloadKb, int uploadKb});
+
+/// 种子限速对话框：由对话框自己持有输入控制器，避免「控制器已释放仍在渲染」。
+class _SeedLimitsDialog extends StatefulWidget {
+  const _SeedLimitsDialog({required this.downloadKb, required this.uploadKb});
+
+  final int downloadKb;
+  final int uploadKb;
+
+  @override
+  State<_SeedLimitsDialog> createState() => _SeedLimitsDialogState();
+}
+
+class _SeedLimitsDialogState extends State<_SeedLimitsDialog> {
+  late final TextEditingController _download =
+      TextEditingController(text: widget.downloadKb <= 0 ? '' : '${widget.downloadKb}');
+  late final TextEditingController _upload =
+      TextEditingController(text: widget.uploadKb <= 0 ? '' : '${widget.uploadKb}');
+
+  @override
+  void dispose() {
+    _download.dispose();
+    _upload.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return AlertDialog(
+      title: const Text('种子限速'),
+      content: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: <Widget>[
+          TextField(
+            controller: _download,
+            keyboardType: TextInputType.number,
+            decoration: const InputDecoration(
+              labelText: '下载限速（KB/s）',
+              hintText: '0 或留空表示不限',
+            ),
+          ),
+          const SizedBox(height: AppSpacing.md),
+          TextField(
+            controller: _upload,
+            keyboardType: TextInputType.number,
+            decoration: const InputDecoration(
+              labelText: '上传限速（KB/s）',
+              hintText: '0 或留空表示不限',
+            ),
+          ),
+        ],
+      ),
+      actions: <Widget>[
+        TextButton(
+          onPressed: () => Navigator.of(context).pop(),
+          child: const Text('取消'),
+        ),
+        FilledButton(
+          onPressed: () => Navigator.of(context).pop((
+            downloadKb: int.tryParse(_download.text.trim()) ?? 0,
+            uploadKb: int.tryParse(_upload.text.trim()) ?? 0,
+          )),
+          child: const Text('应用'),
+        ),
+      ],
+    );
+  }
+}
+
 /// 单个任务卡片：进度、速率、剩余时间与操作。
 class _TaskCard extends StatelessWidget {
   const _TaskCard({
@@ -745,12 +1081,9 @@ class _TaskCard extends StatelessWidget {
     required this.selectionMode,
     required this.selected,
     required this.onSelected,
-    required this.onPause,
-    required this.onResume,
-    required this.onRemove,
-    required this.onCategory,
-    required this.onTags,
-    required this.onLocation,
+    required this.onLongPress,
+    required this.menuItems,
+    required this.onMenuSelected,
   });
 
   final DownloaderTask task;
@@ -758,12 +1091,11 @@ class _TaskCard extends StatelessWidget {
   final bool selectionMode;
   final bool selected;
   final ValueChanged<bool> onSelected;
-  final VoidCallback onPause;
-  final VoidCallback onResume;
-  final VoidCallback onRemove;
-  final VoidCallback onCategory;
-  final VoidCallback onTags;
-  final VoidCallback onLocation;
+  final VoidCallback onLongPress;
+
+  /// 该任务的「三个点」操作项（多选模式下为空，批量操作走顶部菜单）。
+  final List<PopupMenuEntry<String>> menuItems;
+  final ValueChanged<String> onMenuSelected;
 
   static StatusTone _tone(TaskState state) => switch (state) {
         TaskState.downloading => StatusTone.info,
@@ -781,6 +1113,8 @@ class _TaskCard extends StatelessWidget {
     final ThemeData theme = Theme.of(context);
     return SectionCard(
       onTap: selectionMode ? () => onSelected(!selected) : null,
+      // 长按进入多选；已进入多选时不再触发，避免误进。
+      onLongPress: selectionMode ? null : onLongPress,
       padding: const EdgeInsets.all(AppSpacing.md),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
@@ -801,7 +1135,21 @@ class _TaskCard extends StatelessWidget {
                 ),
               ),
               const SizedBox(width: AppSpacing.sm),
-              StatusBadge(label: task.state.label, tone: _tone(task.state), compact: true),
+              Column(
+                crossAxisAlignment: CrossAxisAlignment.end,
+                children: <Widget>[
+                  StatusBadge(label: task.state.label, tone: _tone(task.state), compact: true),
+                  if (!selectionMode && menuItems.isNotEmpty)
+                    PopupMenuButton<String>(
+                      tooltip: '任务操作',
+                      padding: EdgeInsets.zero,
+                      iconSize: AppSizes.iconMd,
+                      icon: const Icon(Icons.more_vert),
+                      itemBuilder: (BuildContext context) => menuItems,
+                      onSelected: onMenuSelected,
+                    ),
+                ],
+              ),
             ],
           ),
           const SizedBox(height: AppSpacing.sm),
@@ -814,19 +1162,33 @@ class _TaskCard extends StatelessWidget {
             '${formatPercent(task.progress)} · ${formatBytes(task.completedBytes)} / ${formatBytes(task.sizeBytes)}',
             style: theme.textTheme.bodySmall,
           ),
-          const SizedBox(height: AppSpacing.xxs),
-          Wrap(
-            spacing: AppSpacing.md,
-            runSpacing: AppSpacing.xxs,
-            children: <Widget>[
-              Text('↓ ${formatSpeed(task.downloadSpeed)}', style: theme.textTheme.bodySmall),
-              Text('↑ ${formatSpeed(task.uploadSpeed)}', style: theme.textTheme.bodySmall),
-              Text('剩余 ${formatEta(task.etaSeconds)}', style: theme.textTheme.bodySmall),
-              if (task.ratio > 0)
-                Text('分享率 ${task.ratio.toStringAsFixed(2)}', style: theme.textTheme.bodySmall),
-              if (task.category.isNotEmpty)
-                Text('分类 ${task.category}', style: theme.textTheme.bodySmall),
-              Text('服务器 ${task.serverLabel}', style: theme.textTheme.bodySmall),
+          const SizedBox(height: AppSpacing.xs),
+          // 指标统一走等宽统计网格：三列一行，行行铺满（不足一行时用等宽空位补齐）。
+          StatGrid(
+            columns: 3,
+            items: <StatItem>[
+              StatItem(
+                label: '下载',
+                value: formatSpeed(task.downloadSpeed),
+                tone: AppColors.info,
+              ),
+              StatItem(
+                label: '上传',
+                value: formatSpeed(task.uploadSpeed),
+                tone: AppColors.brand,
+              ),
+              StatItem(label: '剩余', value: formatEta(task.etaSeconds)),
+              StatItem(
+                label: '分享率',
+                value: task.ratio > 0 ? task.ratio.toStringAsFixed(2) : '未提供',
+                collected: task.ratio > 0,
+              ),
+              StatItem(
+                label: '分类',
+                value: task.category.isEmpty ? '未分类' : task.category,
+                collected: task.category.isNotEmpty,
+              ),
+              StatItem(label: '服务器', value: task.serverLabel),
             ],
           ),
           if (task.tags.isNotEmpty) ...<Widget>[
@@ -854,23 +1216,6 @@ class _TaskCard extends StatelessWidget {
               child: Padding(
                 padding: EdgeInsets.all(AppSpacing.sm),
                 child: SizedBox(width: 18, height: 18, child: CircularProgressIndicator(strokeWidth: 2)),
-              ),
-            )
-          else if (!selectionMode)
-            Align(
-              alignment: Alignment.centerRight,
-              child: Wrap(
-                spacing: AppSpacing.xs,
-                children: <Widget>[
-                  TextButton(
-                    onPressed: task.isPaused ? onResume : onPause,
-                    child: Text(task.isPaused ? '继续' : '暂停'),
-                  ),
-                  TextButton(onPressed: onCategory, child: const Text('分类')),
-                  TextButton(onPressed: onTags, child: const Text('标签')),
-                  TextButton(onPressed: onLocation, child: const Text('路径')),
-                  TextButton(onPressed: onRemove, child: const Text('移除')),
-                ],
               ),
             ),
         ],

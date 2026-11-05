@@ -22,6 +22,9 @@ abstract final class PrefKeys {
   static const String sitesMasked = 'sites.masked';
   static const String sitesViewMode = 'sites.viewMode';
 
+  // 下载器列表展示偏好：列表图（完整数据）/ 网格图（卡片概览与图表）
+  static const String downloadersViewMode = 'downloaders.viewMode';
+
   // 代理（旁路由）：整体以 JSON 保存，代理密码在 SecureStore
   static const String proxySettings = 'proxy.settings';
 

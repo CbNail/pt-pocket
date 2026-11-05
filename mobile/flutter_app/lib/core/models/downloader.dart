@@ -194,6 +194,11 @@ class DownloaderTask {
     this.tags = const <String>[],
     this.tracker = '',
     this.addedAt,
+    this.magnetUri = '',
+    this.forceStart = false,
+    this.downloadLimitBytes = 0,
+    this.uploadLimitBytes = 0,
+    this.trackersCount = 0,
   });
 
   /// 任务唯一标识（qBittorrent / Transmission 均为 info hash）。
@@ -219,6 +224,20 @@ class DownloaderTask {
 
   /// 加入时间；服务端未提供时为 null（排序时统一落到末尾）。
   final DateTime? addedAt;
+
+  /// 磁力链接（qBittorrent 的 `magnet_uri` / Transmission 的 `magnetLink`）；空表示引擎未提供。
+  /// 只用于「复制磁力链接」这类本机操作，不参与筛选与排序。
+  final String magnetUri;
+
+  /// 是否强制开始（qBittorrent 的 `force_start`；Transmission 的强制开始由「立即开始」下发）。
+  final bool forceStart;
+
+  /// 单任务下载 / 上传限速（字节/秒）；0 表示不限。
+  final int downloadLimitBytes;
+  final int uploadLimitBytes;
+
+  /// tracker 数量；0 表示引擎未提供（qBittorrent 的 `trackers_count`）。
+  final int trackersCount;
 
   bool get isPaused => state.isPaused;
 
@@ -261,6 +280,12 @@ class DownloaderTask {
       ratio: _num(json, <String>['ratio', 'uploadRatio']).toDouble(),
       tags: _strList(json, <String>['tags', 'labels']),
       tracker: _str(json, <String>['tracker', 'trackerHost', 'siteName', 'site']),
+      magnetUri: _str(json, <String>['magnetUri', 'magnet_uri', 'magnetLink']),
+      forceStart: json['forceStart'] == true || json['force_start'] == true,
+      downloadLimitBytes:
+          _num(json, <String>['downloadLimitBytes', 'dl_limit', 'downloadLimit']).toInt(),
+      uploadLimitBytes: _num(json, <String>['uploadLimitBytes', 'up_limit', 'uploadLimit']).toInt(),
+      trackersCount: _num(json, <String>['trackersCount', 'trackers_count']).toInt(),
       addedAt: _parseDate(
         json['addedAt'] ?? json['addedOn'] ?? json['addedTime'] ?? json['added_time'] ??
             json['additionDate'] ?? json['dateAdded'],
@@ -334,7 +359,10 @@ enum TaskSort {
 class TaskQuery {
   const TaskQuery({
     this.statuses = const <TaskState>{},
-    this.tracker = '',
+    this.categories = const <String>{},
+    this.tags = const <String>{},
+    this.paths = const <String>{},
+    this.servers = const <String>{},
     this.sort = TaskSort.addedAt,
     this.descending = true,
   });
@@ -342,25 +370,49 @@ class TaskQuery {
   /// 选中的状态集合；空集表示「全部状态」。
   final Set<TaskState> statuses;
 
-  /// 选中的服务器（tracker / 站点域名）；空串表示「全部服务器」。
-  final String tracker;
+  /// 选中的分类；空集表示「全部分类」。按精确匹配过滤。
+  final Set<String> categories;
+
+  /// 选中的标签；空集表示「全部标签」。任务带其中任意一个即命中。
+  final Set<String> tags;
+
+  /// 选中的保存路径；空集表示「全部路径」。按精确匹配过滤。
+  final Set<String> paths;
+
+  /// 选中的服务器（tracker / 站点域名）；空集表示「全部服务器」。
+  final Set<String> servers;
 
   final TaskSort sort;
 
   /// 是否倒序（默认：新加入在前）。
   final bool descending;
 
-  bool get isEmptyFilter => statuses.isEmpty && tracker.isEmpty;
+  bool get isEmptyFilter =>
+      statuses.isEmpty && categories.isEmpty && tags.isEmpty && paths.isEmpty && servers.isEmpty;
+
+  /// 生效中的筛选维度数量（界面用来提示「筛选中」）。
+  int get activeFilterCount =>
+      (statuses.isEmpty ? 0 : 1) +
+      (categories.isEmpty ? 0 : 1) +
+      (tags.isEmpty ? 0 : 1) +
+      (paths.isEmpty ? 0 : 1) +
+      (servers.isEmpty ? 0 : 1);
 
   TaskQuery copyWith({
     Set<TaskState>? statuses,
-    String? tracker,
+    Set<String>? categories,
+    Set<String>? tags,
+    Set<String>? paths,
+    Set<String>? servers,
     TaskSort? sort,
     bool? descending,
   }) =>
       TaskQuery(
         statuses: statuses ?? this.statuses,
-        tracker: tracker ?? this.tracker,
+        categories: categories ?? this.categories,
+        tags: tags ?? this.tags,
+        paths: paths ?? this.paths,
+        servers: servers ?? this.servers,
         sort: sort ?? this.sort,
         descending: descending ?? this.descending,
       );
@@ -370,7 +422,10 @@ class TaskQuery {
     final List<DownloaderTask> filtered = tasks
         .where((DownloaderTask task) =>
             (statuses.isEmpty || statuses.contains(task.state)) &&
-            (tracker.isEmpty || task.tracker == tracker))
+            (categories.isEmpty || categories.contains(task.category)) &&
+            (paths.isEmpty || paths.contains(task.savePath)) &&
+            (servers.isEmpty || servers.contains(task.tracker)) &&
+            (tags.isEmpty || task.tags.any(tags.contains)))
         .toList();
 
     int compare(DownloaderTask a, DownloaderTask b) {
@@ -391,6 +446,44 @@ class TaskQuery {
         descending ? compare(b, a) : compare(a, b));
     return filtered;
   }
+}
+
+/// 添加任务的请求（界面收集 → 网关下发）。
+class AddTaskRequest {
+  const AddTaskRequest({
+    this.links = const <String>[],
+    this.fileName = '',
+    this.fileBytes = const <int>[],
+    this.autoManaged = false,
+    this.category = '',
+    this.tags = const <String>[],
+    this.savePath = '',
+    this.paused = false,
+  });
+
+  /// 种子链接 / 磁力链接（已按行拆分、去掉空行）。
+  final List<String> links;
+
+  /// 种子文件名与字节流（未选择文件时为空）。
+  final String fileName;
+  final List<int> fileBytes;
+
+  /// 是否交由下载器自动管理（Transmission 的 `auto-managed`；qBittorrent 无此开关）。
+  final bool autoManaged;
+
+  final String category;
+  final List<String> tags;
+  final String savePath;
+
+  /// 添加后是否暂停。
+  final bool paused;
+
+  bool get hasFile => fileName.isNotEmpty && fileBytes.isNotEmpty;
+
+  /// 本次要提交的任务数（1 个种子文件算 1 条）。
+  int get itemCount => links.length + (hasFile ? 1 : 0);
+
+  bool get isEmpty => itemCount == 0;
 }
 
 /// 下载器可选值（分类 / 标签 / 路径），供任务批量操作的选择器使用。
@@ -419,6 +512,88 @@ class DownloaderTaskOption {
         .map((Object? item) => item.toString().trim())
         .where((String item) => item.isNotEmpty)
         .toList(growable: false);
+  }
+}
+
+/// 单个下载器的聚合统计（列表卡片与网格图表共用同一份口径）。
+///
+/// 「已采集」与「未采集」分得很清：任务列表取到了就是 [sampled] = true；
+/// 引擎没提供的字段（剩余空间、限速、版本）保持 null 或空串，界面显示「未采集」，
+/// 不用 0 冒充。
+class DownloaderStats {
+  const DownloaderStats({
+    this.total = 0,
+    this.stateCounts = const <TaskState, int>{},
+    this.categoryCounts = const <String, int>{},
+    this.downloadSpeed = 0,
+    this.uploadSpeed = 0,
+    this.freeSpaceBytes,
+    this.downloadLimitBytes,
+    this.uploadLimitBytes,
+    this.version = '',
+    this.sampled = false,
+    this.failureMessage = '',
+  });
+
+  /// 种子总数。
+  final int total;
+
+  /// 各状态的任务数（未出现的状态按 0 处理）。
+  final Map<TaskState, int> stateCounts;
+
+  /// 分类 → 任务数（图表用）；没有分类的任务归到「未分类」。
+  final Map<String, int> categoryCounts;
+
+  final int downloadSpeed;
+  final int uploadSpeed;
+
+  /// 剩余磁盘空间（字节）；null 表示引擎未提供。
+  final int? freeSpaceBytes;
+
+  /// 全局下载 / 上传限速（字节/秒）；0 表示不限，null 表示未采集。
+  final int? downloadLimitBytes;
+  final int? uploadLimitBytes;
+
+  /// 引擎版本；空串表示未采集。
+  final String version;
+
+  /// 任务列表是否真的取到了（false 时整张卡片按「未采集」呈现）。
+  final bool sampled;
+
+  /// 采集失败的原因（界面直接显示原因，而不是把失败画成 0）。
+  final String failureMessage;
+
+  int countOf(TaskState state) => stateCounts[state] ?? 0;
+
+  /// 按任务列表统计；引擎级字段（速率 / 限速 / 剩余空间 / 版本）由调用方传入。
+  factory DownloaderStats.fromTasks(
+    List<DownloaderTask> tasks, {
+    int? downloadSpeed,
+    int? uploadSpeed,
+    int? freeSpaceBytes,
+    int? downloadLimitBytes,
+    int? uploadLimitBytes,
+    String version = '',
+  }) {
+    final Map<TaskState, int> counts = <TaskState, int>{};
+    final Map<String, int> categories = <String, int>{};
+    for (final DownloaderTask task in tasks) {
+      counts[task.state] = (counts[task.state] ?? 0) + 1;
+      final String key = task.category.trim().isEmpty ? '未分类' : task.category.trim();
+      categories[key] = (categories[key] ?? 0) + 1;
+    }
+    return DownloaderStats(
+      total: tasks.length,
+      stateCounts: counts,
+      categoryCounts: categories,
+      downloadSpeed: downloadSpeed ?? 0,
+      uploadSpeed: uploadSpeed ?? 0,
+      freeSpaceBytes: freeSpaceBytes,
+      downloadLimitBytes: downloadLimitBytes,
+      uploadLimitBytes: uploadLimitBytes,
+      version: version,
+      sampled: true,
+    );
   }
 }
 

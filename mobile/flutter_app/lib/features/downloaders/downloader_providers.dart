@@ -1,6 +1,7 @@
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../core/direct/direct_providers.dart';
+import '../../core/direct/downloader_speed_history.dart';
 import '../../core/direct/downloader_gateway.dart';
 import '../../core/direct/qbittorrent_client.dart';
 import '../../core/models/downloader.dart';
@@ -152,6 +153,7 @@ final Provider<DownloaderGateway> downloaderGatewayProvider = Provider<Downloade
         ref.read(downloaderRepositoryProvider).readCredential(downloaderId),
     nas: ref.watch(downloaderApiProvider),
     qb: ref.watch(qbittorrentClientProvider),
+    tr: ref.watch(transmissionClientProvider),
   ),
 );
 
@@ -168,6 +170,22 @@ final FutureProviderFamily<DownloaderTaskOption, String> downloaderTaskOptionsPr
   (Ref ref, String downloaderId) =>
       ref.watch(downloaderGatewayProvider).fetchTaskOptions(downloaderId),
 );
+
+/// 单个下载器的聚合统计（列表卡片与网格图共用同一份口径）。
+///
+/// 每次成功取到就顺手记一次速率采样，供网格图的速率曲线使用；采样只在内存里，
+/// 不落盘、不做长期统计。
+final FutureProviderFamily<DownloaderStats, String> downloaderStatsProvider =
+    FutureProvider.family<DownloaderStats, String>((Ref ref, String downloaderId) async {
+  final DownloaderStats stats =
+      await ref.watch(downloaderGatewayProvider).fetchStats(downloaderId);
+  if (stats.sampled) {
+    ref
+        .read(downloaderSpeedHistoryProvider)
+        .record(downloaderId, stats.downloadSpeed, stats.uploadSpeed);
+  }
+  return stats;
+});
 
 /// 下载器全局传输状态（qBittorrent 直连时可用；任务页头部的速度条）。
 final FutureProviderFamily<QbTransferInfo?, String> downloaderTransferProvider =

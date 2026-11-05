@@ -71,6 +71,9 @@ class QbTransferInfo {
     this.downloadedBytes = 0,
     this.uploadedBytes = 0,
     this.version = '',
+    this.freeSpaceBytes,
+    this.downloadLimitBytes,
+    this.uploadLimitBytes,
   });
 
   final int downloadSpeed;
@@ -78,6 +81,13 @@ class QbTransferInfo {
   final int downloadedBytes;
   final int uploadedBytes;
   final String version;
+
+  /// 剩余磁盘空间（字节）；null 表示引擎未返回（界面显示「未采集」）。
+  final int? freeSpaceBytes;
+
+  /// 全局下载 / 上传限速（字节/秒）；0 表示不限，null 表示未采集。
+  final int? downloadLimitBytes;
+  final int? uploadLimitBytes;
 }
 
 /// qBittorrent WebUI API（`/api/v2`）直连客户端。
@@ -197,14 +207,31 @@ class QbittorrentClient {
       cancelToken: cancelToken,
       tolerateErrors: true,
     );
+    // 剩余空间与全局限速只在 `server_state` 里（`/transfer/info` 不含这两个字段）。
+    final Object? mainDataRaw = await _getJson(
+      config,
+      credential,
+      '/sync/maindata',
+      cancelToken: cancelToken,
+      tolerateErrors: true,
+    );
     final Map<String, dynamic> map =
         info is Map<String, dynamic> ? info : const <String, dynamic>{};
+    final Map<String, dynamic> serverState =
+        mainDataRaw is Map<String, dynamic> && mainDataRaw['server_state'] is Map<String, dynamic>
+            ? mainDataRaw['server_state'] as Map<String, dynamic>
+            : const <String, dynamic>{};
     return QbTransferInfo(
       downloadSpeed: _int(map['dl_info_speed']),
       uploadSpeed: _int(map['up_info_speed']),
       downloadedBytes: _int(map['dl_info_data']),
       uploadedBytes: _int(map['up_info_data']),
       version: versionRaw is String ? versionRaw.trim() : '',
+      freeSpaceBytes: _intOrNull(serverState['free_space_on_disk']),
+      downloadLimitBytes:
+          _intOrNull(serverState['dl_rate_limit']) ?? _intOrNull(map['dl_rate_limit']),
+      uploadLimitBytes:
+          _intOrNull(serverState['up_rate_limit']) ?? _intOrNull(map['up_rate_limit']),
     );
   }
 
@@ -270,6 +297,140 @@ class QbittorrentClient {
         'hashes': _join(hashes),
         'location': savePath,
       });
+
+  // ---------- 添加种子与单任务高级操作 ----------
+
+  /// 添加种子：多条链接 / 磁力用换行一次提交（qBittorrent 的 `urls` 字段）。
+  Future<void> addTorrentLinks(
+    DownloaderConfig config,
+    Map<String, dynamic>? credential, {
+    required List<String> links,
+    String category = '',
+    List<String> tags = const <String>[],
+    String savePath = '',
+    bool paused = false,
+  }) async {
+    final List<String> valid = links
+        .map((String link) => link.trim())
+        .where((String link) => link.isNotEmpty)
+        .toList(growable: false);
+    if (valid.isEmpty) {
+      throw const DownloaderFetchException(
+        kind: DownloaderFailureKind.unparsed,
+        message: '请至少填一条种子链接或磁力链接',
+      );
+    }
+    await _postForm(config, credential, '/torrents/add', <String, String>{
+      'urls': valid.join('\n'),
+      if (category.trim().isNotEmpty) 'category': category.trim(),
+      if (tags.isNotEmpty) 'tags': tags.where((String t) => t.trim().isNotEmpty).join(','),
+      if (savePath.trim().isNotEmpty) 'savepath': savePath.trim(),
+      'paused': paused ? 'true' : 'false',
+    });
+  }
+
+  /// 添加种子文件（`.torrent` 字节流，multipart 上传）。
+  Future<void> addTorrentFile(
+    DownloaderConfig config,
+    Map<String, dynamic>? credential, {
+    required List<int> bytes,
+    required String filename,
+    String category = '',
+    List<String> tags = const <String>[],
+    String savePath = '',
+    bool paused = false,
+  }) async {
+    final FormData form = FormData.fromMap(<String, dynamic>{
+      'torrents': MultipartFile.fromBytes(bytes, filename: filename),
+      if (category.trim().isNotEmpty) 'category': category.trim(),
+      if (tags.isNotEmpty) 'tags': tags.where((String t) => t.trim().isNotEmpty).join(','),
+      if (savePath.trim().isNotEmpty) 'savepath': savePath.trim(),
+      'paused': paused ? 'true' : 'false',
+    });
+    await _postMultipart(config, credential, '/torrents/add', form);
+  }
+
+  /// 重新校验。
+  Future<void> recheck(DownloaderConfig config, Map<String, dynamic>? credential, List<String> hashes) =>
+      _postForm(config, credential, '/torrents/recheck', <String, String>{'hashes': _join(hashes)});
+
+  /// 重新汇报 tracker。
+  Future<void> reannounce(DownloaderConfig config, Map<String, dynamic>? credential, List<String> hashes) =>
+      _postForm(config, credential, '/torrents/reannounce', <String, String>{'hashes': _join(hashes)});
+
+  /// 强制继续开关。
+  Future<void> setForceStart(
+    DownloaderConfig config,
+    Map<String, dynamic>? credential,
+    List<String> hashes,
+    bool enabled,
+  ) =>
+      _postForm(config, credential, '/torrents/setForceStart', <String, String>{
+        'hashes': _join(hashes),
+        'value': enabled ? 'true' : 'false',
+      });
+
+  /// 单任务下载限速（字节/秒）；0 表示不限。
+  Future<void> setDownloadLimit(
+    DownloaderConfig config,
+    Map<String, dynamic>? credential,
+    List<String> hashes,
+    int bytesPerSecond,
+  ) =>
+      _postForm(config, credential, '/torrents/setDownloadLimit', <String, String>{
+        'hashes': _join(hashes),
+        'limit': '${bytesPerSecond < 0 ? 0 : bytesPerSecond}',
+      });
+
+  /// 单任务上传限速（字节/秒）；0 表示不限。
+  Future<void> setUploadLimit(
+    DownloaderConfig config,
+    Map<String, dynamic>? credential,
+    List<String> hashes,
+    int bytesPerSecond,
+  ) =>
+      _postForm(config, credential, '/torrents/setUploadLimit', <String, String>{
+        'hashes': _join(hashes),
+        'limit': '${bytesPerSecond < 0 ? 0 : bytesPerSecond}',
+      });
+
+  /// multipart 表单提交（添加种子文件用；文本表单走 [_postForm]）。
+  Future<void> _postMultipart(
+    DownloaderConfig config,
+    Map<String, dynamic>? credential,
+    String path,
+    FormData data,
+  ) async {
+    await _withSession<void>(
+      config,
+      credential,
+      (QbSession session) async {
+        final Response<String> response = await _dio.postUri<String>(
+          UrlUtils.joinPath(UrlUtils.normalize(config.baseUrl)!, '$_apiPrefix$path'),
+          data: data,
+          options: Options(
+            responseType: ResponseType.plain,
+            headers: <String, dynamic>{'Cookie': 'SID=${session.sid}'},
+            sendTimeout: timeout,
+            receiveTimeout: timeout,
+            validateStatus: (int? status) => status != null,
+          ),
+        );
+        final int status = response.statusCode ?? 0;
+        if (status == 401 || status == 403) {
+          throw _SessionExpired(status);
+        }
+        if (status < 200 || status >= 300) {
+          throw DownloaderFetchException(
+            kind: DownloaderFailureKind.unknown,
+            message: '${config.name} 添加种子失败（HTTP $status）',
+            target: path,
+            statusCode: status,
+          );
+        }
+      },
+    );
+  }
 
   /// 登录并缓存会话；已缓存时直接复用。
   Future<QbSession> ensureSession(
@@ -550,6 +711,13 @@ class QbittorrentClient {
     return 0;
   }
 
+  /// 与 [_int] 的差别：缺失返回 null——「未采集」与真实的 0 必须分得开。
+  static int? _intOrNull(Object? value) {
+    if (value is num) return value.toInt();
+    if (value is String) return int.tryParse(value.trim());
+    return null;
+  }
+
   /// 把 qBittorrent 的任务字段映射成统一模型。
   static DownloaderTask parseTorrentJson(Map<String, dynamic> json) =>
       _taskFromQb(json);
@@ -576,6 +744,11 @@ class QbittorrentClient {
           .where((String t) => t.isNotEmpty)
           .toList(growable: false),
       tracker: json['tracker']?.toString() ?? '',
+      magnetUri: json['magnet_uri']?.toString() ?? '',
+      forceStart: json['force_start'] == true,
+      downloadLimitBytes: _int(json['dl_limit']),
+      uploadLimitBytes: _int(json['up_limit']),
+      trackersCount: _int(json['trackers_count']),
       addedAt: _addedAt(json['added_on']),
     );
   }

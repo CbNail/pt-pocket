@@ -185,7 +185,8 @@ void main() {
       final TaskQuery byState = const TaskQuery().copyWith(statuses: <TaskState>{TaskState.paused});
       expect(byState.apply(tasks).map((DownloaderTask t) => t.hash), <String>['h3']);
 
-      final TaskQuery byServer = const TaskQuery().copyWith(tracker: 'tracker.a.com');
+      final TaskQuery byServer =
+          const TaskQuery().copyWith(servers: <String>{'tracker.a.com'});
       expect(byServer.apply(tasks).map((DownloaderTask t) => t.hash), <String>['h1', 'h3']);
 
       final TaskQuery both = byServer.copyWith(statuses: <TaskState>{TaskState.downloading});
@@ -444,18 +445,27 @@ void main() {
       expect(find.text('编辑配置'), findsNothing);
       expect(find.textContaining('http://a:8080'), findsNothing);
 
-      // 任务本身可见，且有筛选、排序与多选入口。
+      // 任务本身可见，筛选入口在右上角（三横线），正文只有条数与排序摘要。
       expect(find.text('甲'), findsOneWidget);
       expect(find.text('乙'), findsOneWidget);
-      expect(find.text('全部状态'), findsOneWidget);
-      expect(find.text('全部服务器'), findsOneWidget);
-      expect(find.text('服务器'), findsOneWidget);
-      expect(find.byIcon(Icons.sort), findsOneWidget);
-      expect(find.byIcon(Icons.checklist), findsOneWidget);
+      expect(find.byIcon(Icons.filter_list), findsOneWidget);
+      expect(find.text('共 2 条任务'), findsOneWidget);
+      expect(find.textContaining('排序 加入时间'), findsOneWidget);
+
+      // 打开筛选面板：状态 / 分类 / 标签 / 路径 / 服务器 都在，
+      // 没有取值的维度不虚构候选，直接写明原因。
+      await tester.tap(find.byIcon(Icons.filter_list));
+      await tester.pumpAndSettle();
+      expect(find.text('筛选'), findsOneWidget);
+      expect(find.text('任务里还没有分类'), findsOneWidget);
+      expect(find.text('任务里还没有标签'), findsOneWidget);
+      expect(find.text('任务里还没有保存路径'), findsOneWidget);
+      expect(find.widgetWithText(FilterChip, '全部服务器'), findsOneWidget);
+      expect(find.widgetWithText(FilterChip, 'tracker.a.com (1)'), findsOneWidget);
+      expect(find.widgetWithText(FilterChip, '已暂停 (1)'), findsOneWidget);
 
       // 状态筛选：只看已暂停 → 只剩「乙」。
-      // 任务卡片上的状态徽标也写着「已暂停」，所以点的是筛选条里的胶囊。
-      await tester.tap(find.widgetWithText(FilterChip, '已暂停'));
+      await tester.tap(find.widgetWithText(FilterChip, '已暂停 (1)'));
       await tester.pumpAndSettle();
       expect(find.text('甲'), findsNothing);
       expect(find.text('乙'), findsOneWidget);
@@ -477,7 +487,8 @@ void main() {
       await tester.tap(find.text('主力 qB'));
       await tester.pumpAndSettle();
 
-      await tester.tap(find.byIcon(Icons.checklist));
+      // 多选入口改为「长按任务卡片」（右上角不再放多选按钮）。
+      await tester.longPress(find.text('甲'));
       await tester.pumpAndSettle();
       await tester.tap(find.text('全选'));
       await tester.pumpAndSettle();
